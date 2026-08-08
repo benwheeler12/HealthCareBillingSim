@@ -234,6 +234,17 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     Fold-as-you-go with retained event log (live stats + replayable audit).
 11. Scope cuts, named: clearinghouse misrouting to wrong payer; payer crash as distinct
     from infinite latency (indistinguishable in-process — collapsed into 2.1).
+12. **Virtual-time spike findings (build step 1).** (a) `start_paused(true)` requires
+    tokio's `test-util` feature (a main dependency here, not dev-only — the binary
+    itself runs paused) and a **current-thread runtime**: auto-advance does not exist
+    on the multi-thread runtime. Consequence: the simulation is concurrent but
+    single-threaded by construction; "use all cores" applies to CPU-bound work
+    (report generation over snapshots), not the event loop. (b) A `select!` between
+    two timers firing at the same virtual instant picks a branch at random —
+    claim tasks must use `biased;` (response preferred over timeout) to keep the
+    outcome-determinism claim honest. (c) Spike kept as `tests/virtual_time.rs`
+    (permanent regression proof) rather than thrown away — deviation from "throwaway"
+    wording, zero maintenance cost, guards the load-bearing assumption.
 
 ## Module layout
 

@@ -1,0 +1,9 @@
+[package]
+name = "healthcare-billing-sim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# `test-util` is required in the main dependency set: the simulation binary itself
+# runs under a paused-clock runtime (Builder::start_paused), not just the tests.
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "test-util"] }
