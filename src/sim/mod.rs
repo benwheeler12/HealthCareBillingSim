@@ -1,6 +1,7 @@
 //! Simulation adversary: clearinghouse + payers. Memoryless and reproducible —
 //! pure functions of seed + config. Must never import `biller/`.
 
+pub mod clearinghouse;
 pub mod faults;
 pub mod payer;
 pub mod rng;
