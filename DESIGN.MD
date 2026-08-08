@@ -245,6 +245,15 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     outcome-determinism claim honest. (c) Spike kept as `tests/virtual_time.rs`
     (permanent regression proof) rather than thrown away — deviation from "throwaway"
     wording, zero maintenance cost, guards the load-bearing assumption.
+13. **Ledger schema deltas (build step 2).** (a) `ClaimState::Pending` added: ingest
+    and first submission are distinct ledger events, so the record needs a state for
+    the ms-scale gap between them. (b) Identity fields are `Option<ClaimIdentity>`:
+    rejected rows from unparseable lines have no identity to record, and the design
+    requires them to be ledger rows anyway. (c) `LineRecord` carries `do_not_bill`
+    (needed to enforce Decision #9's exclusion from aggregates at report time).
+    (d) Money is a `Money(i64)` newtype in cents (the design offered i64 or
+    rust_decimal; zero-dependency exact integer math wins). Fractional-cent input
+    amounts are schema violations, not rounding candidates.
 
 ## Module layout
 
