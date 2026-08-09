@@ -254,6 +254,25 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     (d) Money is a `Money(i64)` newtype in cents (the design offered i64 or
     rust_decimal; zero-dependency exact integer math wins). Fractional-cent input
     amounts are schema violations, not rounding candidates.
+14. **Late-remittance reconciliation lives in the fold** (build step 4, fault 2.3).
+    A claim task is gone by definition when a late answer arrives, so the
+    Flagged(RetriesExhausted) → Resolved transition (Decision #6) is applied by the
+    ledger fold via a pure complete-and-balanced check over the record. Lifecycle
+    logic stays in the biller; this is record surgery on an already-terminal row.
+15. **Return-hop faults execute inside payer delivery tasks** (build step 4).
+    Drops, delays, line drops, corruption and garbage on the payer → biller hop are
+    drawn and applied in the per-delivery task the clearinghouse spawns. Keeps hop
+    concurrency (a delayed remit blocks nothing) and preserves structural shutdown
+    (the clearinghouse drains until every delivery task ends).
+16. **The sim-truth diagnostic report imports sim-truth** (build step 5) — a
+    deliberate exception to "reports depend only on ledger": the god's-eye view's
+    entire purpose is comparing the two views. The protected invariant — sim-truth
+    never leaking INTO the ledger — is untouched; no other report may touch sim.
+17. **Payer-side outstanding is booked-or-not, per line** (build step 5): a line
+    contributes zero to A/R once answered AND balanced; otherwise its full billed
+    amount stays outstanding — including disputed (dishonest) answers, which a
+    practice cannot book. Aging keys off first_submitted_at (payer A/R) and
+    adjudicated_at (patient responsibility), per the report section.
 
 ## Module layout
 
