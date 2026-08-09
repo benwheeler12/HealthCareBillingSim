@@ -4,7 +4,7 @@
 
 use tokio::sync::mpsc;
 
-use crate::domain::{ClaimId, Clock, ValidationError, VirtualTime};
+use crate::domain::{ClaimId, Clock, RemittanceAdvice, ValidationError, VirtualTime};
 use crate::ledger::records::{Adjudication, ClaimIdentity, FlagReason, LineRecord};
 
 #[derive(Clone, Debug)]
@@ -29,8 +29,13 @@ pub enum ClaimEvent {
     },
     /// Remittance for a claim the biller has never known (fault 3.2).
     RemittanceQuarantined,
-    /// Remittance for a claim already terminal (Decisions #5/#6 territory).
-    LateRemittance,
+    /// Remittance for a claim already terminal. Carries the full remittance:
+    /// on a Resolved claim it is ignored (logged idempotency, Decisions #5);
+    /// on Flagged(RetriesExhausted), a complete, balanced late answer is
+    /// allowed to transition the claim to Resolved (Decisions #6).
+    LateRemittance {
+        remit: RemittanceAdvice,
+    },
 }
 
 #[derive(Clone, Debug)]

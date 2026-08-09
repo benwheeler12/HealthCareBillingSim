@@ -88,13 +88,24 @@ impl Clearinghouse {
                 "return/drop",
                 faults.return_drop_rate,
             ) {
-                let fault = InjectedFault {
-                    claim_id: claim.claim_id.clone(),
-                    attempt,
-                    kind: FaultKind::ReturnDrop,
-                };
-                let _ = sim_truth.send(fault).await;
+                record_fault(&sim_truth, &claim.claim_id, attempt, FaultKind::ReturnDrop).await;
                 return;
+            }
+
+            // Fault 2.3: extra transport delay. Whether this becomes a
+            // "timeout" is the biller's policy's business, not ours.
+            if chance(
+                &rng,
+                &claim.claim_id,
+                attempt,
+                "return/delay",
+                faults.extra_delay_rate,
+            ) {
+                let secs = rng
+                    .transport(&claim.claim_id, attempt, "return/delay_magnitude")
+                    .random_range(0.0..faults.max_extra_delay_secs.max(f64::MIN_POSITIVE));
+                record_fault(&sim_truth, &claim.claim_id, attempt, FaultKind::ExtraDelay).await;
+                tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
             }
 
             // Send failure means the clearinghouse itself is gone — shutdown.
@@ -103,14 +114,23 @@ impl Clearinghouse {
     }
 
     async fn record(&self, claim_id: ClaimId, attempt: u32, kind: FaultKind) {
-        let fault = InjectedFault {
-            claim_id,
-            attempt,
-            kind,
-        };
-        // Recorder outlives all injectors by construction.
-        let _ = self.sim_truth.send(fault).await;
+        record_fault(&self.sim_truth, &claim_id, attempt, kind).await;
     }
+}
+
+async fn record_fault(
+    sim_truth: &mpsc::Sender<InjectedFault>,
+    claim_id: &ClaimId,
+    attempt: u32,
+    kind: FaultKind,
+) {
+    let fault = InjectedFault {
+        claim_id: claim_id.clone(),
+        attempt,
+        kind,
+    };
+    // Recorder outlives all injectors by construction.
+    let _ = sim_truth.send(fault).await;
 }
 
 async fn forward(remits_out: &mpsc::Sender<RemittanceAdvice>, remit: RemittanceAdvice) {

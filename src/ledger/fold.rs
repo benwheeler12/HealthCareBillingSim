@@ -4,8 +4,11 @@
 
 use tokio::sync::mpsc;
 
+use crate::domain::RemittanceAdvice;
 use crate::ledger::events::{ClaimEvent, StampedEvent};
-use crate::ledger::records::{ClaimRecord, ClaimState, Ledger};
+use crate::ledger::records::{
+    Adjudication, ClaimRecord, ClaimState, FlagReason, Ledger, LineRecord,
+};
 
 /// Single consumer of the ledger channel. Returns the final ledger when every
 /// sender has been dropped — which, by shutdown design, means every claim has
@@ -97,10 +100,64 @@ impl Ledger {
                 };
                 record.resolved_at = Some(stamped.at);
             }
-            ClaimEvent::LateRemittance => {} // history entry only
+            ClaimEvent::LateRemittance { remit } => apply_late_remittance(record, remit, stamped),
             ClaimEvent::Ingested { .. }
             | ClaimEvent::Rejected { .. }
             | ClaimEvent::RemittanceQuarantined => unreachable!("handled in apply"),
         }
     }
+}
+
+/// Late-arrival policy (Decisions #5/#6). On a Resolved claim the duplicate is
+/// ignored — the history entry (already pushed) is the logged idempotency. On
+/// Flagged(RetriesExhausted), a complete and exactly-balanced late answer
+/// transitions the claim to Resolved; anything less stays flagged. This lives
+/// in the fold because the claim task is gone by definition — the transition
+/// is pure record surgery, not lifecycle logic.
+fn apply_late_remittance(
+    record: &mut ClaimRecord,
+    remit: &RemittanceAdvice,
+    stamped: &StampedEvent,
+) {
+    let exhausted = ClaimState::Flagged {
+        reason: FlagReason::RetriesExhausted,
+    };
+    if record.state != exhausted || !complete_and_balanced(&record.lines, remit) {
+        return;
+    }
+    for rline in &remit.lines {
+        let line = record
+            .lines
+            .iter_mut()
+            .find(|l| l.service_line_id == rline.service_line_id)
+            .expect("checked by complete_and_balanced");
+        line.adjudication = Some(Adjudication {
+            payer_paid: rline.payer_paid,
+            coinsurance: rline.coinsurance,
+            copay: rline.copay,
+            deductible: rline.deductible,
+            not_allowed: rline.not_allowed,
+            denial_reason: rline.denial_reason,
+            adjudicated_at: stamped.at,
+        });
+    }
+    tracing::info!(claim_id = %record.claim_id, "late remittance resolved a flagged claim");
+    record.state = ClaimState::Resolved;
+    record.resolved_at = Some(stamped.at);
+}
+
+/// Exact-answer check against the record's billable lines: every billable line
+/// covered exactly once, every line's money balancing to the cent.
+fn complete_and_balanced(lines: &[LineRecord], remit: &RemittanceAdvice) -> bool {
+    let billable: Vec<&LineRecord> = lines.iter().filter(|l| !l.do_not_bill).collect();
+    if remit.lines.len() != billable.len() {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::new();
+    remit.lines.iter().all(|rline| {
+        seen.insert(&rline.service_line_id)
+            && billable.iter().any(|l| {
+                l.service_line_id == rline.service_line_id && l.billed() == rline.accounted()
+            })
+    })
 }
