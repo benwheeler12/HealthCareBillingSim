@@ -29,7 +29,7 @@ cargo run -- data/sample_claims.jsonl --preset honest
 # Roll your own input at any size:
 cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out claims.jsonl
 
-# Tests (52) and lints:
+# Tests (55) and lints:
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
@@ -37,11 +37,16 @@ cargo clippy --all-targets -- -D warnings
 ## CLI
 
 On a real terminal, runs open an **interactive UI**: the reports are panes on
-a static screen — ←/→ to move between Overview, AR Aging, Patient,
+a static screen — ←/→ to move between Overview, Timeline, AR Aging, Patient,
 Scorecard, Denials, Chase, and Diagnostic; ↑/↓ scrolls (or selects rows in
 the chase list); **Enter on a chase-list row opens that claim's full audit
 trail** — every event with virtual timestamps, straight from the
-event-sourced ledger. A live status box pinned to the bottom shows
+event-sourced ledger. The **Timeline pane charts the run**: per-virtual-day
+flow rates (ingested, submitted — including retries, so the gap above intake
+is the fault injection made visible — remitted, settled) over a second chart
+of the in-flight backlog, which rises through intake and drains to zero: the
+correctness guarantee as a picture. Both are replayed from the retained
+event log. A live status box pinned to the bottom shows
 claims/resolved/rejected/flagged, the virtual clock, and wall time while the
 run is in flight. `q` quits and prints the plain report so a record stays in
 your scrollback. When stdout is not a terminal (pipes, CI) or with

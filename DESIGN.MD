@@ -309,6 +309,20 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     "serialize to terminal, then shut down" contract verbatim, and quitting
     the UI also prints the plain report so a scrollback record remains.
 
+22. **Timeline pane: the event log replayed as charts.** The retained raw
+    event log (Decisions on ledger schema; every event stamped with virtual
+    time) is bucketed into fixed windows and rendered as two stacked charts:
+    per-virtual-day flow rates for ingested / submitted / remitted / settled,
+    and the in-flight backlog (cumulative ingested minus settled) with an
+    intake-end marker. Series chosen for what they *prove*: submitted minus
+    ingested is retry traffic — the fault injection made visible; the backlog
+    draining to exactly zero is the every-claim-terminal guarantee as a
+    picture. Rejected/duplicate/quarantine/garbage/late events are excluded —
+    they are epistemics or ingest-terminal rows, not claim flow. The
+    bucketing is a pure function with unit tests; a claim flagged then
+    revived by a late remittance emits exactly one terminal event, so the
+    backlog never double-counts.
+
 ## Module layout
 
 ```
