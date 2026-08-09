@@ -154,3 +154,98 @@ fn diagnostic_squares_ledger_view_with_ground_truth() {
     }
     assert!(diag.truth.iter().any(|(k, _)| *k == FaultKind::ForwardDrop));
 }
+
+/// The A/R views report over the intake-end snapshot: mid-flight claims are
+/// genuinely young receivables there, while the final books still satisfy
+/// the terminal guarantee. Under the messy preset's per-payer routes, each
+/// payer shows a distinct aging profile — medicare clustered young, anthem
+/// pushed old through its lossy, slow route.
+#[test]
+fn intake_snapshot_ages_across_the_spectrum_with_payer_contrast() {
+    // Drifted mix like the shipped sample: anthem-heavy early, medicare late.
+    let input: Vec<String> = (0..300)
+        .map(|i| {
+            let position = i as f64 / 300.0;
+            let anthem_w = 0.55 + (0.10 - 0.55) * position;
+            let medicare_w = 0.10 + (0.55 - 0.10) * position;
+            let draw = (i as f64 * 0.618_034) % 1.0; // deterministic spread
+            let payer = if draw < anthem_w {
+                "anthem"
+            } else if draw < anthem_w + medicare_w {
+                "medicare"
+            } else {
+                "united_health_group"
+            };
+            common::claim_line(
+                &format!("c-{i:03}"),
+                payer,
+                serde_json::json!([common::service_line("L1", 1, 250.0, false)]),
+            )
+        })
+        .collect();
+    let path = write_input("snapshot_aging.jsonl", &input);
+
+    // 300 claims across ~150 virtual days, messy preset personalities.
+    let mut cfg = RunConfig::new(path, 42, 300.0 / (150.0 * 86_400.0));
+    healthcare_billing_sim::scenario::preset("messy")
+        .expect("messy")
+        .apply(&mut cfg);
+
+    let output = run_sim_with(cfg);
+
+    // Terminal guarantee holds on the final books...
+    for record in output.ledger.claims.values() {
+        assert!(
+            record.state.is_terminal(),
+            "claim {} stuck",
+            record.claim_id
+        );
+    }
+    // ...while the intake snapshot is genuinely mid-flight.
+    let in_flight = output
+        .ledger
+        .claims
+        .keys()
+        .filter(|id| !output.intake_ledger.claims[*id].state.is_terminal())
+        .count();
+    assert!(in_flight > 0, "snapshot must catch claims still in flight");
+
+    let aging = ar_aging(&output.intake_ledger, output.intake_finished_at);
+    let buckets = |p: PayerId| aging.payer.get(&p).copied().unwrap_or_default();
+    let total: healthcare_billing_sim::reports::aging::AgingBuckets = {
+        let mut t = healthcare_billing_sim::reports::aging::AgingBuckets::default();
+        for b in aging.payer.values() {
+            t.d0_30 += b.d0_30;
+            t.d31_60 += b.d31_60;
+            t.d61_90 += b.d61_90;
+            t.d90_plus += b.d90_plus;
+        }
+        t
+    };
+    assert!(total.d0_30 > Money::ZERO, "0-30d empty");
+    assert!(total.d31_60 > Money::ZERO, "31-60d empty");
+    assert!(total.d61_90 > Money::ZERO, "61-90d empty");
+    assert!(total.d90_plus > Money::ZERO, "90+d empty");
+
+    // Profile contrast: medicare's outstanding leans young; anthem's old.
+    let medicare = buckets(PayerId::Medicare);
+    let anthem = buckets(PayerId::Anthem);
+    let young_share = |b: healthcare_billing_sim::reports::aging::AgingBuckets| {
+        b.d0_30.cents() as f64 / b.total().cents().max(1) as f64
+    };
+    let old_share = |b: healthcare_billing_sim::reports::aging::AgingBuckets| {
+        b.d90_plus.cents() as f64 / b.total().cents().max(1) as f64
+    };
+    assert!(
+        young_share(medicare) > young_share(anthem),
+        "medicare should cluster young ({:.2} vs {:.2})",
+        young_share(medicare),
+        young_share(anthem)
+    );
+    assert!(
+        old_share(anthem) > old_share(medicare),
+        "anthem should cluster old ({:.2} vs {:.2})",
+        old_share(anthem),
+        old_share(medicare)
+    );
+}

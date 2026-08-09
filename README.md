@@ -14,14 +14,14 @@ spec, the test matrix, and (deliberately) the git history.
 ## Quickstart
 
 ```sh
-# The default run already has weather in it — real clearinghouses lose
-# things, so drops, duplicates, and delays are on out of the box (preset
-# 'messy'), and the 5k sample includes ~2% deliberately malformed lines:
+# The default run already has weather in it — drops, duplicates, delays,
+# and per-payer route personalities (preset 'messy'), payers answering in
+# days-to-weeks, and the 5k sample spread across ~4.5 virtual months, so
+# the AR aging report fills every bucket with a distinct profile per payer:
 cargo run -- data/sample_claims_5k.jsonl
 
-# The showcase: every fault class at once, a slow denial-happy anthem,
-# submissions spread across ~4 virtual months so every report fills:
-cargo run -- data/sample_claims_5k.jsonl --preset chaos --rate 0.0005
+# The showcase: every fault class at once plus a denial-happy anthem:
+cargo run -- data/sample_claims_5k.jsonl --preset chaos
 
 # Lossless baseline, if you want a true happy path:
 cargo run -- data/sample_claims.jsonl --preset honest
@@ -56,8 +56,12 @@ Configuration layers, later wins: **defaults → `--preset` →
   `--dishonest-rate`, `--line-drop-rate`, `--corrupt-id-rate`,
   `--garbage-rate`, `--max-attempts`, `--timeout-secs`, `--backoff-secs`.
 - `--seed` reproduces outcomes exactly; `--rate` is claims per *virtual*
-  second (low rates spread submissions across virtual months, which is what
-  makes AR aging interesting); `--chase` sizes the chase list.
+  second — the default (0.0004, one claim every ~42 virtual minutes) spreads
+  the 5k sample across ~4.5 virtual months so receivables genuinely age;
+  `--chase` sizes the chase list.
+- Scenario files and presets can set **per-payer fault profiles** (a payer
+  entry's `faults` section) — different clearinghouse routes fail
+  differently, which is what gives each payer its own aging profile.
 - Long runs show a live progress line (claims/resolved/flagged + the virtual
   clock) on stderr; disable with `--no-progress`. Colors follow the terminal
   and `NO_COLOR`; force off with `--no-color`. Reports go to stdout, logs to
@@ -159,6 +163,13 @@ test — `git log --oneline` reads as the fault table. Highlights:
   guarantee plus outcome-determinism.
 
 ## Reports (all pure functions over a ledger snapshot + now)
+
+The A/R views (aging, chase list, days in A/R) report over a **snapshot
+frozen at the moment intake ends** — a real A/R report is mid-flight by
+nature; on the final books every young receivable has been deliberately
+driven terminal, which would empty the young buckets by construction. The
+summary and diagnostic still assert the terminal guarantee on the final
+ledger, and the output labels both moments.
 
 `AR aging by payer` (ages from **first** submission — retries never make a
 stuck claim look fresh) · `patient responsibility aging` (ages from

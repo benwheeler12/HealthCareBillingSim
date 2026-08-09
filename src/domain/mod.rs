@@ -12,5 +12,5 @@ pub use claim::{Claim, ClaimId, PayerId, ServiceLine};
 pub use messages::{Delivery, Submission, SubmittedClaim, SubmittedLine};
 pub use money::Money;
 pub use remittance::{DenialReason, RemittanceAdvice, RemittanceLine};
-pub use time::{Clock, VirtualTime};
+pub use time::{Clock, VirtualTime, human_virtual};
 pub use validation::ValidationError;
