@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::domain::{ClaimId, DenialReason, Money, PayerId, ValidationError, VirtualTime};
 use crate::ledger::events::StampedEvent;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Ledger {
     /// No secondary indexes; scans are fine at this scale.
     pub claims: HashMap<ClaimId, ClaimRecord>,

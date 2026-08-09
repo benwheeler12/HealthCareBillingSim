@@ -30,6 +30,12 @@ struct Cli {
     /// Output path; stdout if omitted.
     #[arg(long)]
     out: Option<PathBuf>,
+
+    /// Drift the payer mix across the file: anthem-heavy early, medicare-heavy
+    /// late (uhg steady). Gives each payer a distinct A/R aging profile when
+    /// the file is ingested over virtual months.
+    #[arg(long)]
+    drift: bool,
 }
 
 const FIRST_NAMES: &[&str] = &[
@@ -62,17 +68,36 @@ fn main() -> anyhow::Result<()> {
     };
 
     for i in 0..cli.count {
+        let position = i as f64 / cli.count.max(1) as f64;
         let line = if rng.random_bool(cli.malformed_rate) {
-            malformed_line(&mut rng, i)
+            malformed_line(&mut rng, i, cli.drift, position)
         } else {
-            valid_line(&mut rng, i)
+            valid_line(&mut rng, i, cli.drift, position)
         };
         writeln!(out, "{line}")?;
     }
     Ok(())
 }
 
-fn valid_line(rng: &mut ChaCha8Rng, i: usize) -> String {
+/// Payer for this line. Uniform by default; with drift, anthem dominates the
+/// start of the file and medicare the end.
+fn pick_payer(rng: &mut ChaCha8Rng, drift: bool, position: f64) -> &'static str {
+    if !drift {
+        return PAYERS[rng.random_range(0..PAYERS.len())];
+    }
+    let anthem = 0.55 + (0.10 - 0.55) * position;
+    let medicare = 0.10 + (0.55 - 0.10) * position;
+    let draw: f64 = rng.random_range(0.0..1.0);
+    if draw < anthem {
+        "anthem"
+    } else if draw < anthem + medicare {
+        "medicare"
+    } else {
+        "united_health_group"
+    }
+}
+
+fn valid_line(rng: &mut ChaCha8Rng, i: usize, drift: bool, position: f64) -> String {
     let lines: Vec<serde_json::Value> = (0..rng.random_range(1..=4))
         .map(|l| {
             json!({
@@ -91,7 +116,7 @@ fn valid_line(rng: &mut ChaCha8Rng, i: usize) -> String {
         "claim_id": format!("gen-{i:06}"),
         "place_of_service_code": 11,
         "insurance": {
-            "payer_id": PAYERS[rng.random_range(0..PAYERS.len())],
+            "payer_id": pick_payer(rng, drift, position),
             "patient_member_id": format!("M-{:08}", rng.random_range(0..100_000_000u64)),
         },
         "patient": {
@@ -112,8 +137,8 @@ fn valid_line(rng: &mut ChaCha8Rng, i: usize) -> String {
     .to_string()
 }
 
-fn malformed_line(rng: &mut ChaCha8Rng, i: usize) -> String {
-    let valid = valid_line(rng, i);
+fn malformed_line(rng: &mut ChaCha8Rng, i: usize, drift: bool, position: f64) -> String {
+    let valid = valid_line(rng, i, drift, position);
     match rng.random_range(0..5) {
         // 1.1: not JSON at all.
         0 => format!("{{corrupted {}", &valid[1..valid.len().min(40)]),

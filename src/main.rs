@@ -5,6 +5,7 @@ use std::time::Duration;
 use clap::Parser;
 use tokio::sync::watch;
 
+use healthcare_billing_sim::domain::human_virtual;
 use healthcare_billing_sim::ledger::fold::Progress;
 use healthcare_billing_sim::reports::{
     ChaseList, Denials, Scorecard, ar_aging, chase_list, days_in_ar, denial_breakdown, diagnostic,
@@ -33,9 +34,9 @@ struct Cli {
     seed: u64,
 
     /// Ingest rate, claims per VIRTUAL second (wall time is always fast).
-    /// Low rates spread submissions across virtual months, which is what
-    /// makes the AR-aging buckets interesting.
-    #[arg(long, default_value_t = 1.0, help_heading = "Simulation")]
+    /// The default spreads the 5k sample across ~4.5 virtual months so
+    /// receivables genuinely age; raise it to compress the timeline.
+    #[arg(long, default_value_t = 0.0004, help_heading = "Simulation")]
     rate: f64,
 
     /// Named fault preset. The default is 'messy' — real clearinghouses lose
@@ -153,21 +154,30 @@ fn main() -> anyhow::Result<()> {
     let wall = wall_start.elapsed();
 
     let (ledger, now) = (&output.ledger, output.finished_at);
+    // A/R views are a mid-flight snapshot by nature: on the final books every
+    // claim has been driven terminal, so young receivables would be empty by
+    // construction. Aging/chase/days-in-A/R report over the books as of the
+    // moment intake ended; everything else reads the final ledger.
+    let (books, as_of) = (&output.intake_ledger, output.intake_finished_at);
     print_styled(&summarize(ledger).to_string(), &style);
     println!();
-    print_styled(&ar_aging(ledger, now).to_string(), &style);
+    println!(
+        "{}the A/R views below are a snapshot as of end of intake ({}), mid-flight —\nthe books as a biller would see them; the run then drained to terminal by {}{}\n",
+        style.dim, as_of, output.finished_at, style.reset,
+    );
+    print_styled(&ar_aging(books, as_of).to_string(), &style);
     println!(
         "{}days in A/R:{} {:.1}\n",
         style.bold,
         style.reset,
-        days_in_ar(ledger, now)
+        days_in_ar(books, as_of)
     );
     print_styled(&Scorecard(payer_scorecard(ledger)).to_string(), &style);
     println!();
     print_styled(&Denials(denial_breakdown(ledger)).to_string(), &style);
     println!();
     print_styled(
-        &ChaseList(chase_list(ledger, now, cli.chase)).to_string(),
+        &ChaseList(chase_list(books, as_of, cli.chase)).to_string(),
         &style,
     );
     println!();
@@ -260,19 +270,26 @@ fn print_banner(cli: &Cli, cfg: &RunConfig, provenance: &[String], style: &Style
         cfg.rate_per_sec
     );
     println!(
-        "  {bold}retry policy{reset}         {} attempts · {:.0}s timeout · {:.0}s backoff base",
+        "  {bold}retry policy{reset}         {} attempts · {} timeout · {} backoff base",
         cfg.policy.max_attempts,
-        cfg.policy.timeout.as_secs_f64(),
-        cfg.policy.backoff_base.as_secs_f64(),
+        human_virtual(cfg.policy.timeout.as_secs_f64()),
+        human_virtual(cfg.policy.backoff_base.as_secs_f64()),
     );
-    println!("  {bold}faults{reset}               {}", fault_summary(cfg));
+    println!(
+        "  {bold}faults{reset}               {}",
+        fault_summary(&cfg.faults)
+    );
     for payer in healthcare_billing_sim::domain::PayerId::ALL {
         let p = &cfg.payers[&payer];
+        let route = match cfg.payer_faults.get(&payer) {
+            Some(profile) => format!(" · route: {}", fault_summary(profile)),
+            None => String::new(),
+        };
         println!(
-            "  {bold}{:<20}{reset} responds {:.0}-{:.0}s · denies {:.0}% · copay {}",
+            "  {bold}{:<20}{reset} responds in {} to {} · denies {:.0}% · copay {}{route}",
             payer.as_str(),
-            p.min_response_time_secs,
-            p.max_response_time_secs,
+            human_short(p.min_response_time_secs),
+            human_short(p.max_response_time_secs),
             p.denial_rate * 100.0,
             p.copay,
         );
@@ -284,8 +301,7 @@ fn print_banner(cli: &Cli, cfg: &RunConfig, provenance: &[String], style: &Style
     println!("{dim}{}{reset}\n", "─".repeat(72));
 }
 
-fn fault_summary(cfg: &RunConfig) -> String {
-    let f = &cfg.faults;
+fn fault_summary(f: &healthcare_billing_sim::sim::faults::FaultProfile) -> String {
     let pct = |x: f64| format!("{:.0}%", x * 100.0);
     let mut parts = Vec::new();
     if f.forward_drop_rate > 0.0 {
@@ -301,7 +317,7 @@ fn fault_summary(cfg: &RunConfig) -> String {
         parts.push(format!(
             "delays {} (≤{})",
             pct(f.extra_delay_rate),
-            human_virtual(f.max_extra_delay_secs)
+            human_short(f.max_extra_delay_secs)
         ));
     }
     if f.dishonest_adjudication_rate > 0.0 {
@@ -403,12 +419,13 @@ fn print_styled(text: &str, style: &Style) {
     }
 }
 
-fn human_virtual(secs: f64) -> String {
+/// Compact virtual-duration for dense table/banner lines ("3d", "4.5h").
+fn human_short(secs: f64) -> String {
     match secs {
-        s if s >= 86_400.0 => format!("{:.1} virtual days", s / 86_400.0),
-        s if s >= 3_600.0 => format!("{:.1} virtual hours", s / 3_600.0),
-        s if s >= 60.0 => format!("{:.1} virtual minutes", s / 60.0),
-        s => format!("{s:.0} virtual seconds"),
+        s if s >= 86_400.0 => format!("{:.0}d", s / 86_400.0),
+        s if s >= 3_600.0 => format!("{:.1}h", s / 3_600.0),
+        s if s >= 60.0 => format!("{:.1}m", s / 60.0),
+        s => format!("{s:.0}s"),
     }
 }
 

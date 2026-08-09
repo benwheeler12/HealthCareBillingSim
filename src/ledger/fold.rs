@@ -2,6 +2,9 @@
 //! runtime monitoring, raw log for replay and audit. `apply` is pure state
 //! transition — the async fn is only the channel shell.
 
+use std::sync::Arc;
+use std::sync::OnceLock;
+
 use tokio::sync::{mpsc, watch};
 
 use crate::domain::{RemittanceAdvice, VirtualTime};
@@ -27,14 +30,38 @@ pub struct Progress {
 /// sender has been dropped — which, by shutdown design, means every claim has
 /// reached a terminal state. When a watch sender is supplied, counters are
 /// published every few events (and once at the end).
+/// The fold returns both views: the final books (every claim terminal) and
+/// the books frozen at the moment intake ended. A/R reports are a mid-flight
+/// snapshot by nature — driving everything terminal first would empty every
+/// young bucket by construction — so aging/chase report over the snapshot
+/// while the terminal guarantee is asserted on the final ledger.
+pub struct FoldOutput {
+    pub ledger: Ledger,
+    pub intake_snapshot: Ledger,
+}
+
 pub async fn run_fold(
     mut rx: mpsc::Receiver<StampedEvent>,
     progress: Option<watch::Sender<Progress>>,
-) -> Ledger {
+    intake_done: Arc<OnceLock<VirtualTime>>,
+) -> FoldOutput {
     let mut ledger = Ledger::default();
+    let mut snapshot: Option<Ledger> = None;
     let mut events: usize = 0;
     while let Some(event) = rx.recv().await {
         let at = event.at;
+        // Freeze the books the first time an event lands strictly past
+        // intake-end: events stamped AT the mark are the final intake
+        // instant's own (the last Ingested rows land at exactly that stamp)
+        // and belong inside the snapshot. run() sets the marker synchronously
+        // before time can advance past it, so nothing later-stamped can be
+        // queued ahead of it. (Match form, not a let-chain: rustc 1.85.)
+        if snapshot.is_none() {
+            match intake_done.get() {
+                Some(mark) if at > *mark => snapshot = Some(ledger.clone()),
+                _ => {}
+            }
+        }
         ledger.apply(event);
         events += 1;
         // `% 32` rather than `is_multiple_of` (rustc 1.87+), and a match
@@ -51,7 +78,11 @@ pub async fn run_fold(
         let last = ledger.event_log.last().map(|e| e.at).unwrap_or_default();
         let _ = tx.send(ledger.progress(last));
     }
-    ledger
+    let intake_snapshot = snapshot.unwrap_or_else(|| ledger.clone());
+    FoldOutput {
+        ledger,
+        intake_snapshot,
+    }
 }
 
 impl Ledger {

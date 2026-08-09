@@ -7,6 +7,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::domain::{DenialReason, Money, PayerId};
+
+/// Compact virtual-duration for the table ("12.4 days", "3.2 hours", "45s").
+fn human_response(secs: f64) -> String {
+    match secs {
+        s if s >= 86_400.0 => format!("{:.1} days", s / 86_400.0),
+        s if s >= 3_600.0 => format!("{:.1} hours", s / 3_600.0),
+        s if s >= 60.0 => format!("{:.1} min", s / 60.0),
+        s => format!("{s:.1}s"),
+    }
+}
 use crate::ledger::records::Ledger;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -14,6 +24,7 @@ pub struct PayerScore {
     pub claims: usize,
     /// Mean virtual seconds from first submission to first booked answer —
     /// the response experience as the biller lived it, retries included.
+    /// (Stored in seconds; displayed in human virtual units.)
     pub avg_response_secs: f64,
     /// Denied lines / adjudicated lines.
     pub denial_rate: f64,
@@ -128,10 +139,10 @@ impl fmt::Display for Scorecard {
         for (payer, s) in &self.0 {
             writeln!(
                 f,
-                "  {:<20} {:>7} {:>15.1}s {:>11.1}% {:>13.1}%",
+                "  {:<20} {:>7} {:>16} {:>11.1}% {:>13.1}%",
                 payer.as_str(),
                 s.claims,
-                s.avg_response_secs,
+                human_response(s.avg_response_secs),
                 s.denial_rate * 100.0,
                 s.paid_to_billed * 100.0,
             )?;

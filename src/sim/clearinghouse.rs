@@ -19,7 +19,9 @@ use crate::sim::sim_truth::{FaultKind, InjectedFault};
 pub struct Clearinghouse {
     pub payers: HashMap<PayerId, PayerConfig>,
     pub rng: RngFactory,
-    pub faults: FaultProfile,
+    /// Resolved per payer: the payer's override when configured, otherwise
+    /// the global profile. Different routes really do fail differently.
+    pub faults: HashMap<PayerId, FaultProfile>,
     pub sim_truth: mpsc::Sender<InjectedFault>,
 }
 
@@ -55,13 +57,15 @@ impl Clearinghouse {
     async fn deliver(&self, submission: Submission, return_tx: mpsc::Sender<Delivery>) {
         let claim_id = submission.claim.claim_id.clone();
         let attempt = submission.attempt;
+        let payer_id = submission.claim.payer_id;
+        let faults = self.faults[&payer_id];
 
         if chance(
             &self.rng,
             &claim_id,
             attempt,
             "forward/drop",
-            self.faults.forward_drop_rate,
+            faults.forward_drop_rate,
         ) {
             self.record(claim_id, attempt, FaultKind::ForwardDrop).await;
             return;
@@ -75,7 +79,7 @@ impl Clearinghouse {
             &claim_id,
             attempt,
             "forward/dup",
-            self.faults.duplicate_rate,
+            faults.duplicate_rate,
         ) {
             self.record(claim_id.clone(), attempt, FaultKind::Duplicate)
                 .await;
@@ -84,11 +88,16 @@ impl Clearinghouse {
             1
         };
 
-        let payer_id = submission.claim.payer_id;
         let cfg = self.payers[&payer_id];
         tracing::debug!(%claim_id, %payer_id, attempt, copies, "clearinghouse delivering claim");
         for _ in 0..copies {
-            self.spawn_payer(submission.claim.clone(), attempt, cfg, return_tx.clone());
+            self.spawn_payer(
+                submission.claim.clone(),
+                attempt,
+                cfg,
+                faults,
+                return_tx.clone(),
+            );
         }
     }
 
@@ -98,10 +107,10 @@ impl Clearinghouse {
         claim: SubmittedClaim,
         attempt: u32,
         cfg: PayerConfig,
+        faults: FaultProfile,
         return_tx: mpsc::Sender<Delivery>,
     ) {
         let rng = self.rng;
-        let faults = self.faults;
         let sim_truth = self.sim_truth.clone();
         tokio::spawn(async move {
             tokio::time::sleep(payer::latency(&cfg, &rng, &claim.claim_id)).await;

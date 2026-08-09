@@ -27,7 +27,12 @@ impl Add<Duration> for VirtualTime {
 
 impl fmt::Display for VirtualTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "t+{:.3}s", self.0.as_secs_f64())
+        let secs = self.0.as_secs_f64();
+        if secs >= 60.0 {
+            write!(f, "t+{}", human_virtual(secs))
+        } else {
+            write!(f, "t+{secs:.3}s")
+        }
     }
 }
 
@@ -48,5 +53,17 @@ impl Clock {
 
     pub fn now(&self) -> VirtualTime {
         VirtualTime(self.start.elapsed())
+    }
+}
+
+/// Render a virtual duration in the units a practice owner thinks in.
+/// Wall-clock durations (program runtime) should NOT use this — they stay in
+/// real seconds; this is for simulated time only.
+pub fn human_virtual(secs: f64) -> String {
+    match secs {
+        s if s >= 86_400.0 => format!("{:.1} virtual days", s / 86_400.0),
+        s if s >= 3_600.0 => format!("{:.1} virtual hours", s / 3_600.0),
+        s if s >= 60.0 => format!("{:.1} virtual minutes", s / 60.0),
+        s => format!("{s:.0} virtual seconds"),
     }
 }

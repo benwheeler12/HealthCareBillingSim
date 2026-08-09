@@ -278,6 +278,25 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     drops, duplicates, and delays being survived rather than a sterile happy
     path. `--preset honest` restores lossless transport. The *library* default
     (`FaultProfile::default()`) stays all-zero: tests opt into faults explicitly.
+19. **A/R views report over the intake-end snapshot** (aging phase). Driving
+    every claim terminal before reporting — the correctness guarantee — would
+    empty every young aging bucket by construction: a real A/R report is a
+    mid-flight snapshot. The fold freezes a clone of the books at the moment
+    the last input line is ingested (race-free: the marker is set before time
+    can advance past it); aging, chase list, and days-in-A/R read that
+    snapshot, clearly labeled, while the summary/diagnostic assert the
+    terminal guarantee on the final ledger.
+20. **Per-payer fault profiles + day-scale presets** (aging phase). Transport
+    faults are resolvable per payer route (clearinghouse looks up the payer's
+    profile, falling back to the global one) — different routes really do fail
+    differently, and it is what gives each payer a distinct aging profile:
+    messy's medicare route is clean but occasionally dishonest (young
+    disputes), anthem's is lossy and slow (claims aging through retries into
+    90+). Presets carry realistic day-scale response times and follow-up
+    policy; virtual durations render in days/months wherever users see them
+    (wall-clock runtime stays in real seconds). The 5k sample is generated
+    with a drifting payer mix (anthem-heavy early, medicare-heavy late) to
+    sharpen the contrast.
 
 ## Module layout
 

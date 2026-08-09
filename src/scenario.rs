@@ -47,6 +47,9 @@ pub struct PayerPatch {
     pub max_deductible_bps: Option<u32>,
     pub coinsurance_bps: Option<u32>,
     pub copay_cents: Option<i64>,
+    /// Per-payer transport/semantic fault overrides, layered on top of the
+    /// global profile: different clearinghouse routes fail differently.
+    pub faults: FaultPatch,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -66,6 +69,25 @@ pub fn load(path: &Path) -> anyhow::Result<Scenario> {
     Ok(scenario)
 }
 
+impl FaultPatch {
+    pub fn count_set(&self) -> usize {
+        [
+            self.forward_drop_rate.is_some(),
+            self.return_drop_rate.is_some(),
+            self.extra_delay_rate.is_some(),
+            self.max_extra_delay_secs.is_some(),
+            self.duplicate_rate.is_some(),
+            self.dishonest_adjudication_rate.is_some(),
+            self.line_drop_rate.is_some(),
+            self.corrupt_claim_id_rate.is_some(),
+            self.corrupt_remittance_rate.is_some(),
+        ]
+        .iter()
+        .filter(|set| **set)
+        .count()
+    }
+}
+
 impl Scenario {
     /// Public validation entry for scenarios built in code (CLI flags).
     pub fn validated(&self) -> anyhow::Result<()> {
@@ -75,25 +97,16 @@ impl Scenario {
     /// How many individual overrides this scenario carries (payer patches
     /// count once each).
     pub fn count_set(&self) -> usize {
-        let f = &self.faults;
         let p = &self.policy;
-        [
-            f.forward_drop_rate.is_some(),
-            f.return_drop_rate.is_some(),
-            f.extra_delay_rate.is_some(),
-            f.max_extra_delay_secs.is_some(),
-            f.duplicate_rate.is_some(),
-            f.dishonest_adjudication_rate.is_some(),
-            f.line_drop_rate.is_some(),
-            f.corrupt_claim_id_rate.is_some(),
-            f.corrupt_remittance_rate.is_some(),
-            p.max_attempts.is_some(),
-            p.timeout_secs.is_some(),
-            p.backoff_base_secs.is_some(),
-        ]
-        .iter()
-        .filter(|set| **set)
-        .count()
+        self.faults.count_set()
+            + [
+                p.max_attempts.is_some(),
+                p.timeout_secs.is_some(),
+                p.backoff_base_secs.is_some(),
+            ]
+            .iter()
+            .filter(|set| **set)
+            .count()
             + self.payers.len()
     }
 
@@ -146,6 +159,11 @@ impl Scenario {
             if let Some(cents) = patch.copay_cents {
                 target.copay = Money::from_cents(cents);
             }
+            if patch.faults.count_set() > 0 {
+                let mut profile = cfg.payer_faults.get(payer).copied().unwrap_or(cfg.faults);
+                apply_faults(&patch.faults, &mut profile);
+                cfg.payer_faults.insert(*payer, profile);
+            }
         }
         if let Some(n) = self.policy.max_attempts {
             cfg.policy.max_attempts = n;
@@ -188,50 +206,93 @@ fn set<T: Copy>(target: &mut T, patch: Option<T>) {
 
 /// Built-in presets for one-flag demos. Precedence in the CLI: defaults →
 /// preset → `--fault-profile` file → individual flags.
+///
+/// All presets share realistic, day-scale payer personalities and a
+/// follow-up policy to match — the units a practice owner lives in. (The
+/// *library* defaults stay second-scale; seeded tests keep their own clock.)
 pub fn preset(name: &str) -> Option<Scenario> {
+    const VDAY: f64 = 86_400.0;
     let mut scenario = Scenario::default();
+
+    // Shared personality base: medicare answers in days, commercial payers in
+    // weeks; the biller follows up after 45 days, twice, a week apart.
+    scenario.payers.insert(
+        PayerId::Medicare,
+        PayerPatch {
+            min_response_time_secs: Some(3.0 * VDAY),
+            max_response_time_secs: Some(10.0 * VDAY),
+            ..PayerPatch::default()
+        },
+    );
+    scenario.payers.insert(
+        PayerId::UnitedHealthGroup,
+        PayerPatch {
+            min_response_time_secs: Some(10.0 * VDAY),
+            max_response_time_secs: Some(25.0 * VDAY),
+            ..PayerPatch::default()
+        },
+    );
+    scenario.payers.insert(
+        PayerId::Anthem,
+        PayerPatch {
+            min_response_time_secs: Some(20.0 * VDAY),
+            max_response_time_secs: Some(40.0 * VDAY),
+            ..PayerPatch::default()
+        },
+    );
+    scenario.policy = PolicyPatch {
+        max_attempts: Some(3),
+        timeout_secs: Some(45.0 * VDAY),
+        backoff_base_secs: Some(7.0 * VDAY),
+    };
+
     match name {
-        // Honest, lossless adversary — the defaults, spelled out.
+        // Lossless transport — the true happy path, on realistic clocks.
         "honest" => {}
-        // Everyday clearinghouse weather: losses and lag, all recoverable.
+        // Everyday clearinghouse weather, with per-route personalities that
+        // give each payer a distinct A/R aging profile: medicare's route is
+        // clean but occasionally lies (young disputes); anthem's route loses
+        // things constantly (old claims stuck in retry loops); uhg between.
         "messy" => {
             scenario.faults = FaultPatch {
-                forward_drop_rate: Some(0.15),
-                return_drop_rate: Some(0.10),
-                duplicate_rate: Some(0.10),
-                extra_delay_rate: Some(0.15),
-                max_extra_delay_secs: Some(600.0),
+                forward_drop_rate: Some(0.08),
+                return_drop_rate: Some(0.05),
+                duplicate_rate: Some(0.08),
+                ..FaultPatch::default()
+            };
+            let medicare = scenario.payers.get_mut(&PayerId::Medicare).expect("base");
+            medicare.faults = FaultPatch {
+                forward_drop_rate: Some(0.03),
+                return_drop_rate: Some(0.02),
+                dishonest_adjudication_rate: Some(0.05),
+                ..FaultPatch::default()
+            };
+            let anthem = scenario.payers.get_mut(&PayerId::Anthem).expect("base");
+            anthem.faults = FaultPatch {
+                forward_drop_rate: Some(0.35),
+                return_drop_rate: Some(0.20),
+                extra_delay_rate: Some(0.20),
+                max_extra_delay_secs: Some(30.0 * VDAY),
                 ..FaultPatch::default()
             };
         }
-        // Everything at once, month-scale delays, a slow denial-happy anthem,
-        // and a tight retry budget: fills every report.
+        // Everything at once: heavy transport chaos, semantic faults, a
+        // denial-happy anthem, and a tight retry budget.
         "chaos" => {
             scenario.faults = FaultPatch {
                 forward_drop_rate: Some(0.20),
                 return_drop_rate: Some(0.10),
                 duplicate_rate: Some(0.10),
                 extra_delay_rate: Some(0.15),
-                max_extra_delay_secs: Some(2_592_000.0), // 30 virtual days
+                max_extra_delay_secs: Some(60.0 * VDAY),
                 dishonest_adjudication_rate: Some(0.06),
                 line_drop_rate: Some(0.05),
                 corrupt_claim_id_rate: Some(0.05),
                 corrupt_remittance_rate: Some(0.05),
             };
-            scenario.payers.insert(
-                PayerId::Anthem,
-                PayerPatch {
-                    min_response_time_secs: Some(500.0),
-                    max_response_time_secs: Some(3000.0),
-                    denial_rate: Some(0.35),
-                    ..PayerPatch::default()
-                },
-            );
-            scenario.policy = PolicyPatch {
-                max_attempts: Some(2),
-                timeout_secs: Some(5000.0),
-                ..PolicyPatch::default()
-            };
+            let anthem = scenario.payers.get_mut(&PayerId::Anthem).expect("base");
+            anthem.denial_rate = Some(0.35);
+            scenario.policy.max_attempts = Some(2);
         }
         _ => return None,
     }
@@ -247,7 +308,8 @@ mod tests {
         let scenario: Scenario = serde_json::from_str(
             r#"{
                 "faults": {"forward_drop_rate": 0.3},
-                "payers": {"anthem": {"denial_rate": 0.5, "min_response_time_secs": 100.0}},
+                "payers": {"anthem": {"denial_rate": 0.5, "min_response_time_secs": 100.0,
+                                       "faults": {"forward_drop_rate": 0.9}}},
                 "policy": {"max_attempts": 2}
             }"#,
         )
@@ -263,17 +325,42 @@ mod tests {
         assert_eq!(anthem.min_response_time_secs, 100.0);
         assert_eq!(anthem.max_response_time_secs, default_anthem_max);
         assert_eq!(cfg.policy.max_attempts, 2);
+        // Per-payer faults layer over the (patched) global profile.
+        let anthem_faults = cfg.payer_faults[&PayerId::Anthem];
+        assert_eq!(anthem_faults.forward_drop_rate, 0.9);
+        assert_eq!(anthem_faults.return_drop_rate, 0.0);
+        assert!(!cfg.payer_faults.contains_key(&PayerId::Medicare));
     }
 
     #[test]
     fn presets_resolve_and_apply() {
         assert!(preset("nonsense").is_none());
-        assert_eq!(preset("honest").expect("honest").count_set(), 0);
 
-        let chaos = preset("chaos").expect("chaos");
+        // Honest: realistic clocks, zero fault rates anywhere.
         let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);
-        chaos.apply(&mut cfg);
-        assert!(cfg.faults.forward_drop_rate > 0.0);
+        preset("honest").expect("honest").apply(&mut cfg);
+        assert_eq!(cfg.faults.forward_drop_rate, 0.0);
+        assert!(cfg.payer_faults.is_empty());
+        assert!(cfg.payers[&PayerId::Medicare].min_response_time_secs >= 86_400.0);
+        assert!(
+            cfg.policy.timeout.as_secs_f64() > cfg.payers[&PayerId::Anthem].max_response_time_secs,
+            "honest runs must never hit emergent timeouts"
+        );
+
+        // Messy: per-payer route personalities.
+        let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);
+        preset("messy").expect("messy").apply(&mut cfg);
+        let anthem = cfg.payer_faults[&PayerId::Anthem];
+        let medicare = cfg.payer_faults[&PayerId::Medicare];
+        assert!(anthem.forward_drop_rate > cfg.faults.forward_drop_rate);
+        assert!(medicare.forward_drop_rate < cfg.faults.forward_drop_rate);
+        assert!(medicare.dishonest_adjudication_rate > 0.0);
+        assert_eq!(anthem.dishonest_adjudication_rate, 0.0);
+
+        // Chaos: everything on, tight budget.
+        let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);
+        preset("chaos").expect("chaos").apply(&mut cfg);
+        assert!(cfg.faults.corrupt_remittance_rate > 0.0);
         assert_eq!(cfg.policy.max_attempts, 2);
         assert!(cfg.payers[&PayerId::Anthem].denial_rate > 0.3);
     }

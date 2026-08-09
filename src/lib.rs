@@ -12,6 +12,7 @@ pub mod sim;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -23,7 +24,7 @@ use crate::biller::dispatcher::run_dispatcher;
 use crate::biller::policy::RetryPolicy;
 use crate::domain::{Claim, ClaimId, Clock, PayerId, VirtualTime, validation};
 use crate::ledger::events::{ClaimEvent, LedgerTx};
-use crate::ledger::fold::{Progress, run_fold};
+use crate::ledger::fold::{FoldOutput, Progress, run_fold};
 use crate::ledger::records::{ClaimIdentity, Ledger, LineRecord};
 use crate::sim::clearinghouse::Clearinghouse;
 use crate::sim::faults::FaultProfile;
@@ -39,6 +40,9 @@ pub struct RunConfig {
     pub policy: RetryPolicy,
     pub payers: HashMap<PayerId, PayerConfig>,
     pub faults: FaultProfile,
+    /// Per-payer fault overrides; payers absent here use `faults`. Different
+    /// clearinghouse routes really do fail differently.
+    pub payer_faults: HashMap<PayerId, FaultProfile>,
     /// Optional live-counter tap for progress display; None in tests.
     pub progress: Option<watch::Sender<Progress>>,
 }
@@ -52,6 +56,7 @@ impl RunConfig {
             policy: RetryPolicy::default(),
             payers: default_payer_configs(),
             faults: FaultProfile::default(),
+            payer_faults: HashMap::new(),
             progress: None,
         }
     }
@@ -61,9 +66,16 @@ impl RunConfig {
 /// simulation's ground truth of injected faults. The gap between the two is
 /// the biller's blind spot — tests use `sim_truth` as the oracle.
 pub struct RunOutput {
+    /// Final books: every claim terminal (the correctness guarantee).
     pub ledger: Ledger,
+    /// The books frozen at the moment intake ended — the mid-flight view a
+    /// biller actually lives in. A/R reports run over this: on the final
+    /// ledger every young receivable has been driven terminal by design.
+    pub intake_ledger: Ledger,
     pub sim_truth: SimTruth,
-    /// Virtual time at completion — the `now` every end-of-run report uses.
+    /// Virtual time when the last input line was ingested.
+    pub intake_finished_at: VirtualTime,
+    /// Virtual time at completion — every claim terminal by here.
     pub finished_at: VirtualTime,
 }
 
@@ -83,13 +95,26 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
     let (sim_truth_tx, sim_truth_rx) = mpsc::channel(256);
     let ledger_tx = LedgerTx::new(ledger_tx, clock.clone());
 
-    let fold = tokio::spawn(run_fold(ledger_rx, cfg.progress.take()));
+    let intake_done: Arc<OnceLock<VirtualTime>> = Arc::new(OnceLock::new());
+    let fold = tokio::spawn(run_fold(
+        ledger_rx,
+        cfg.progress.take(),
+        intake_done.clone(),
+    ));
     let recorder = tokio::spawn(run_recorder(sim_truth_rx));
     let dispatcher = tokio::spawn(run_dispatcher(dispatcher_rx, remit_rx, ledger_tx.clone()));
+    let resolved_faults = cfg
+        .payers
+        .keys()
+        .map(|payer| {
+            let profile = cfg.payer_faults.get(payer).copied().unwrap_or(cfg.faults);
+            (*payer, profile)
+        })
+        .collect();
     let clearinghouse = Clearinghouse {
         payers: cfg.payers.clone(),
         rng: RngFactory::new(cfg.seed),
-        faults: cfg.faults,
+        faults: resolved_faults,
         sim_truth: sim_truth_tx,
     };
     let clearinghouse = tokio::spawn(clearinghouse.run(submission_rx, remit_tx));
@@ -104,6 +129,10 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
     let clock_for_reports = deps.clock.clone();
     let mut claim_tasks = ingest(&cfg, &ledger_tx, &deps).await?;
     drop(deps);
+    // Set synchronously before any further await: virtual time cannot have
+    // advanced past this instant, so the fold's snapshot check is race-free.
+    let intake_finished_at = clock_for_reports.now();
+    let _ = intake_done.set(intake_finished_at);
 
     while let Some(joined) = claim_tasks.join_next().await {
         joined.context("claim task panicked")?;
@@ -111,7 +140,10 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
     clearinghouse.await.context("clearinghouse panicked")?;
     dispatcher.await.context("dispatcher panicked")?;
     drop(ledger_tx);
-    let ledger = fold.await.context("ledger fold panicked")?;
+    let FoldOutput {
+        ledger,
+        intake_snapshot,
+    } = fold.await.context("ledger fold panicked")?;
     let sim_truth = recorder.await.context("sim-truth recorder panicked")?;
 
     tracing::info!(
@@ -121,7 +153,9 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
     );
     Ok(RunOutput {
         ledger,
+        intake_ledger: intake_snapshot,
         sim_truth,
+        intake_finished_at,
         finished_at: clock_for_reports.now(),
     })
 }
