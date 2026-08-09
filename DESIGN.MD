@@ -297,6 +297,17 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     (wall-clock runtime stays in real seconds). The 5k sample is generated
     with a drifting payer mix (anthem-heavy early, medicare-heavy late) to
     sharpen the contrast.
+21. **Interactive TUI as the default terminal experience** (ratatui). Reports
+    are arrayed as panes on a static screen (←/→ to navigate, ↑/↓ to scroll or
+    select, Enter on the chase list opens a claim's full audit trail — the
+    event-sourced ledger on display), with a live status box pinned to the
+    bottom. Threading: the UI event loop owns the main thread on the wall
+    clock; the simulation runs on a worker thread inside its own paused-time
+    runtime, meeting at the progress watch tap and a completion channel. When
+    stdout is not a terminal (pipes, CI) or with --no-tui, output falls back
+    to the plain sequential report — that path satisfies the assessment's
+    "serialize to terminal, then shut down" contract verbatim, and quitting
+    the UI also prints the plain report so a scrollback record remains.
 
 ## Module layout
 

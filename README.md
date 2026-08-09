@@ -36,6 +36,17 @@ cargo clippy --all-targets -- -D warnings
 
 ## CLI
 
+On a real terminal, runs open an **interactive UI**: the reports are panes on
+a static screen — ←/→ to move between Overview, AR Aging, Patient,
+Scorecard, Denials, Chase, and Diagnostic; ↑/↓ scrolls (or selects rows in
+the chase list); **Enter on a chase-list row opens that claim's full audit
+trail** — every event with virtual timestamps, straight from the
+event-sourced ledger. A live status box pinned to the bottom shows
+claims/resolved/rejected/flagged, the virtual clock, and wall time while the
+run is in flight. `q` quits and prints the plain report so a record stays in
+your scrollback. When stdout is not a terminal (pipes, CI) or with
+`--no-tui`, output is the plain sequential report.
+
 The input file is the single required argument (one PayerClaim JSON object
 per line; schema in `docs/TAKE_HOME_PROMPT.MD`). Everything else is an
 optional flag with a sensible default, and every run starts by printing the
