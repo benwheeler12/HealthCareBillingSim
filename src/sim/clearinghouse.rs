@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use rand::Rng;
 use tokio::sync::mpsc;
 
-use crate::domain::{ClaimId, PayerId, RemittanceAdvice, Submission};
+use crate::domain::{ClaimId, PayerId, RemittanceAdvice, Submission, SubmittedClaim};
 use crate::sim::faults::FaultProfile;
 use crate::sim::payer::{self, PayerConfig};
 use crate::sim::rng::RngFactory;
@@ -67,14 +67,43 @@ impl Clearinghouse {
             return;
         }
 
+        // Fault 2.4: duplicate delivery. Both copies share the attempt number,
+        // so the stateless payer adjudicates both into the identical
+        // remittance — the biller must apply at most one.
+        let copies = if chance(
+            &self.rng,
+            &claim_id,
+            attempt,
+            "forward/dup",
+            self.faults.duplicate_rate,
+        ) {
+            self.record(claim_id.clone(), attempt, FaultKind::Duplicate)
+                .await;
+            2
+        } else {
+            1
+        };
+
         let payer_id = submission.claim.payer_id;
         let cfg = self.payers[&payer_id];
+        tracing::debug!(%claim_id, %payer_id, attempt, copies, "clearinghouse delivering claim");
+        for _ in 0..copies {
+            self.spawn_payer(submission.claim.clone(), attempt, cfg, return_tx.clone());
+        }
+    }
+
+    /// One stateless payer adjudication task per delivery.
+    fn spawn_payer(
+        &self,
+        claim: SubmittedClaim,
+        attempt: u32,
+        cfg: PayerConfig,
+        return_tx: mpsc::Sender<RemittanceAdvice>,
+    ) {
         let rng = self.rng;
         let faults = self.faults;
         let sim_truth = self.sim_truth.clone();
-        tracing::debug!(%claim_id, %payer_id, attempt, "clearinghouse delivering claim");
         tokio::spawn(async move {
-            let claim = submission.claim;
             tokio::time::sleep(payer::latency(&cfg, &rng, &claim.claim_id)).await;
             let remit = payer::adjudicate(&claim, &cfg, &rng);
 

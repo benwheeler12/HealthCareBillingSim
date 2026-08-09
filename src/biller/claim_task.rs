@@ -9,7 +9,7 @@ use crate::biller::dispatcher::DispatcherControl;
 use crate::biller::machine::{self, Action, TaskEvent, TaskState};
 use crate::biller::policy::RetryPolicy;
 use crate::domain::{Claim, Clock, Submission};
-use crate::ledger::events::LedgerTx;
+use crate::ledger::events::{ClaimEvent, LedgerTx};
 
 #[derive(Clone)]
 pub struct ClaimTaskDeps {
@@ -51,6 +51,16 @@ pub async fn run_claim(claim: Claim, deps: ClaimTaskDeps) {
             _ = tokio::time::sleep_until(deadline) => TaskEvent::Timeout,
         };
         state = drive(state, event, &claim, &deps, &mut deadline).await;
+    }
+
+    // A duplicate that raced into our channel at the same virtual instant we
+    // went terminal (fault 2.4) must still be logged, not vanish with the
+    // receiver. Duplicates still in the dispatcher's queue take the ordinary
+    // late-remittance path after our Deregister instead.
+    while let Ok(remit) = remit_rx.try_recv() {
+        deps.ledger
+            .emit(claim.claim_id.clone(), ClaimEvent::LateRemittance { remit })
+            .await;
     }
 
     let deregister = DispatcherControl::Deregister {

@@ -214,3 +214,46 @@ fn delays_beyond_timeout_flag_then_late_remittance_resolves() {
         "seed must exercise the ignored duplicate late remit"
     );
 }
+
+/// 2.4: duplicate delivery. Both copies share the attempt number, so the
+/// stateless payer derives the identical remittance twice; the biller applies
+/// at most one adjudication and the surplus copy is logged, never lost.
+#[test]
+fn duplicate_deliveries_apply_at_most_once_and_are_logged() {
+    let input: Vec<String> = (0..30).map(simple_claim).collect();
+    let path = write_input("duplicates.jsonl", &input);
+    let mut cfg = RunConfig::new(path, 42, 10.0);
+    cfg.faults.duplicate_rate = 0.5;
+
+    let output = run_sim_with(cfg);
+    let duplicated = output.sim_truth.claims_with(FaultKind::Duplicate);
+    assert!(
+        !duplicated.is_empty(),
+        "seed must actually inject duplicates"
+    );
+    assert!(output.ledger.quarantine.is_empty());
+
+    for record in output.ledger.claims.values() {
+        assert!(
+            record.state.is_terminal(),
+            "claim {} stuck",
+            record.claim_id
+        );
+        let applied = record
+            .history
+            .iter()
+            .filter(|e| matches!(e.event, ClaimEvent::RemittanceApplied { .. }))
+            .count();
+        assert!(applied <= 1, "claim {} double-counted", record.claim_id);
+        if duplicated.contains(&record.claim_id) {
+            assert_eq!(record.state, ClaimState::Resolved);
+            assert_eq!(record.attempts, 1, "duplicates are not retries");
+            let logged_dups = record
+                .history
+                .iter()
+                .filter(|e| matches!(e.event, ClaimEvent::LateRemittance { .. }))
+                .count();
+            assert!(logged_dups >= 1, "claim {} dup not logged", record.claim_id);
+        }
+    }
+}
