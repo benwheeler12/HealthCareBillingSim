@@ -129,21 +129,43 @@ async fn ingest(
     let interval = Duration::from_secs_f64(1.0 / cfg.rate_per_sec);
 
     let mut tasks = JoinSet::new();
+    let mut seen = std::collections::HashSet::new();
     for (line_no, line) in reader.lines().enumerate() {
         let line = line.context("reading input")?;
+        let line_no = line_no + 1; // 1-based for humans
         tokio::time::sleep(interval).await;
         match validation::validate_line(&line) {
+            // Fault 1.3: a claim_id we've already ingested. First document
+            // wins; the dup becomes a history event, never a resubmission.
+            Ok(claim) if seen.contains(&claim.claim_id) => {
+                tracing::warn!(claim_id = %claim.claim_id, line_no, "duplicate claim_id in input");
+                ledger
+                    .emit(claim.claim_id, ClaimEvent::DuplicateIngest { line_no })
+                    .await;
+            }
+            // Fault 1.4: schema-valid but nothing billable. Policy: resolved
+            // trivially at ingest — correct books with zero submissions.
+            Ok(claim) if claim.billable_lines().count() == 0 => {
+                tracing::info!(claim_id = %claim.claim_id, "no billable lines; trivially resolved");
+                seen.insert(claim.claim_id.clone());
+                ledger
+                    .emit(claim.claim_id.clone(), ingested_event(&claim))
+                    .await;
+                ledger.emit(claim.claim_id, ClaimEvent::Resolved).await;
+            }
             Ok(claim) => {
                 tracing::info!(claim_id = %claim.claim_id, payer = %claim.payer_id, "claim ingested");
+                seen.insert(claim.claim_id.clone());
                 ledger
                     .emit(claim.claim_id.clone(), ingested_event(&claim))
                     .await;
                 tasks.spawn(run_claim(claim, deps.clone()));
             }
             Err((claim_id, reason)) => {
-                let claim_id = claim_id
-                    .unwrap_or_else(|| ClaimId(format!("<unparseable-line-{}>", line_no + 1)));
+                let claim_id =
+                    claim_id.unwrap_or_else(|| ClaimId(format!("<unparseable-line-{line_no}>")));
                 tracing::warn!(%claim_id, ?reason, "claim rejected at ingest");
+                seen.insert(claim_id.clone());
                 ledger.emit(claim_id, ClaimEvent::Rejected { reason }).await;
             }
         }

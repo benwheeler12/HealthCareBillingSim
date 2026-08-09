@@ -16,6 +16,11 @@ pub enum ClaimEvent {
     Rejected {
         reason: ValidationError,
     },
+    /// Fault 1.3: a later input line reused this claim_id. First document
+    /// wins; the duplicate is recorded on the existing row, never resubmitted.
+    DuplicateIngest {
+        line_no: usize,
+    },
     Submitted {
         attempt: u32,
         timeout_at: VirtualTime,

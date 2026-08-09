@@ -101,6 +101,7 @@ impl Ledger {
                 record.resolved_at = Some(stamped.at);
             }
             ClaimEvent::LateRemittance { remit } => apply_late_remittance(record, remit, stamped),
+            ClaimEvent::DuplicateIngest { .. } => {} // history entry only; first doc wins
             ClaimEvent::Ingested { .. }
             | ClaimEvent::Rejected { .. }
             | ClaimEvent::RemittanceQuarantined => unreachable!("handled in apply"),
