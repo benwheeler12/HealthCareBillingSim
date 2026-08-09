@@ -56,7 +56,8 @@ impl Clearinghouse {
         let claim_id = submission.claim.claim_id.clone();
         let attempt = submission.attempt;
 
-        if self.chance(
+        if chance(
+            &self.rng,
             &claim_id,
             attempt,
             "forward/drop",
@@ -69,24 +70,36 @@ impl Clearinghouse {
         let payer_id = submission.claim.payer_id;
         let cfg = self.payers[&payer_id];
         let rng = self.rng;
+        let faults = self.faults;
+        let sim_truth = self.sim_truth.clone();
         tracing::debug!(%claim_id, %payer_id, attempt, "clearinghouse delivering claim");
         tokio::spawn(async move {
             let claim = submission.claim;
             tokio::time::sleep(payer::latency(&cfg, &rng, &claim.claim_id)).await;
             let remit = payer::adjudicate(&claim, &cfg, &rng);
+
+            // Return hop: payer → biller. The payer DID adjudicate; a drop here
+            // (fault 2.2) is indistinguishable from 2.1 to the biller — and the
+            // retry it provokes is answered by deterministic re-adjudication.
+            if chance(
+                &rng,
+                &claim.claim_id,
+                attempt,
+                "return/drop",
+                faults.return_drop_rate,
+            ) {
+                let fault = InjectedFault {
+                    claim_id: claim.claim_id.clone(),
+                    attempt,
+                    kind: FaultKind::ReturnDrop,
+                };
+                let _ = sim_truth.send(fault).await;
+                return;
+            }
+
             // Send failure means the clearinghouse itself is gone — shutdown.
             let _ = return_tx.send(remit).await;
         });
-    }
-
-    /// One transport-fate draw: keyed by (seed, claim_id, attempt, point), so
-    /// the same run always injects the same faults and retries reroll.
-    fn chance(&self, claim_id: &ClaimId, attempt: u32, point: &str, rate: f64) -> bool {
-        rate > 0.0
-            && self
-                .rng
-                .transport(claim_id, attempt, point)
-                .random_bool(rate)
     }
 
     async fn record(&self, claim_id: ClaimId, attempt: u32, kind: FaultKind) {
@@ -102,4 +115,10 @@ impl Clearinghouse {
 
 async fn forward(remits_out: &mpsc::Sender<RemittanceAdvice>, remit: RemittanceAdvice) {
     let _ = remits_out.send(remit).await;
+}
+
+/// One transport-fate draw: keyed by (seed, claim_id, attempt, point), so the
+/// same run always injects the same faults and retries reroll.
+fn chance(rng: &RngFactory, claim_id: &ClaimId, attempt: u32, point: &str, rate: f64) -> bool {
+    rate > 0.0 && rng.transport(claim_id, attempt, point).random_bool(rate)
 }

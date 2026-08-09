@@ -6,7 +6,7 @@ mod common;
 
 use common::{run_sim_with, simple_claim, write_input};
 use healthcare_billing_sim::RunConfig;
-use healthcare_billing_sim::ledger::records::ClaimState;
+use healthcare_billing_sim::ledger::records::{ClaimState, FlagReason};
 use healthcare_billing_sim::sim::sim_truth::FaultKind;
 
 /// 2.1: claims dropped on the forward hop are pure silence. The biller's
@@ -67,4 +67,74 @@ fn forward_drops_are_recovered_by_retry() {
         recovered > 0,
         "at least one dropped claim must recover via retry"
     );
+}
+
+/// 2.2: the payer adjudicated but the remittance was lost. Indistinguishable
+/// from 2.1 biller-side; the retry provokes a re-delivery, and statelessness
+/// guarantees the re-derived remittance is identical — so the recovered
+/// claim's books are exactly what the first (lost) remittance said.
+#[test]
+fn return_drops_recover_with_identical_rederived_remittance() {
+    let input: Vec<String> = (0..40).map(simple_claim).collect();
+    let path = write_input("return_drops.jsonl", &input);
+    let mut cfg = RunConfig::new(path, 42, 10.0);
+    cfg.faults.return_drop_rate = 0.3;
+
+    let output = run_sim_with(cfg);
+    let dropped = output.sim_truth.claims_with(FaultKind::ReturnDrop);
+    assert!(
+        !dropped.is_empty(),
+        "seed must actually inject return drops"
+    );
+
+    let mut recovered = 0;
+    for record in output.ledger.claims.values() {
+        assert!(
+            record.state.is_terminal(),
+            "claim {} stuck",
+            record.claim_id
+        );
+        if dropped.contains(&record.claim_id) && record.state == ClaimState::Resolved {
+            assert!(record.attempts > 1);
+            recovered += 1;
+            // Reconciliation held on the re-derived remittance: exact books.
+            for line in record.lines.iter().filter(|l| !l.do_not_bill) {
+                let adj = line.adjudication.as_ref().expect("adjudicated");
+                assert_eq!(
+                    line.billed(),
+                    adj.payer_paid + adj.patient_responsibility() + adj.not_allowed
+                );
+            }
+        }
+    }
+    assert!(
+        recovered > 0,
+        "at least one return-dropped claim must recover"
+    );
+}
+
+/// 2.6: enough consecutive drops exhaust the retry budget — the claim is
+/// Flagged(RetriesExhausted), a terminal state for the human-review queue.
+/// With a 100% drop rate every claim lands there after exactly max_attempts.
+#[test]
+fn drops_exhausting_retry_budget_flag_the_claim() {
+    let input: Vec<String> = (0..10).map(simple_claim).collect();
+    let path = write_input("exhausted.jsonl", &input);
+    let mut cfg = RunConfig::new(path, 42, 10.0);
+    cfg.faults.forward_drop_rate = 1.0;
+
+    let output = run_sim_with(cfg);
+    assert_eq!(output.sim_truth.count(FaultKind::ForwardDrop), 10 * 3);
+    for record in output.ledger.claims.values() {
+        assert_eq!(
+            record.state,
+            ClaimState::Flagged {
+                reason: FlagReason::RetriesExhausted
+            },
+            "claim {}",
+            record.claim_id
+        );
+        assert_eq!(record.attempts, 3, "bounded: exactly max_attempts");
+        assert!(record.first_submitted_at.is_some());
+    }
 }
