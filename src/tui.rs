@@ -323,15 +323,23 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
             frame.render_widget(body, content);
         }
         Some(done) => {
-            let titles: Vec<&str> = done.panes.iter().map(|p| p.title).collect();
+            // The active tab is a solid block, not just a tinted word: padded
+            // title, black-on-cyan, with the rest of the bar dimmed.
+            let titles: Vec<String> = done
+                .panes
+                .iter()
+                .map(|p| format!(" {} ", p.title))
+                .collect();
             let tabs = Tabs::new(titles)
                 .select(app.pane)
+                .style(Style::default().fg(Color::DarkGray))
                 .highlight_style(
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )
-                .divider("│");
+                .divider("");
             frame.render_widget(tabs, tabs_area);
 
             if app.pane == CHASE_PANE {
@@ -438,8 +446,7 @@ fn draw_timeline(frame: &mut ratatui::Frame, area: Rect, done: &Done) {
     let dim = Style::default().fg(Color::DarkGray);
 
     // Small multiples on one shared y scale, so rates compare across charts
-    // at a glance. Submitted carries the ingested line ghosted behind it —
-    // the gap between them is the retry traffic.
+    // at a glance — submitted riding above ingested is the retry traffic.
     let rate_top = (tl.max_rate * 1.15).max(1.0);
     let quads = [
         (
@@ -451,52 +458,34 @@ fn draw_timeline(frame: &mut ratatui::Frame, area: Rect, done: &Done) {
             ),
             Color::Cyan,
             &tl.ingested,
-            None,
         ),
         (
             q_submitted,
-            format!(
-                " submitted {} · dim = ingested, gap = retries ",
-                tl.totals[1]
-            ),
+            format!(" submitted {} (incl. retries) ", tl.totals[1]),
             Color::Yellow,
             &tl.submitted,
-            Some(&tl.ingested),
         ),
         (
             q_remitted,
             format!(" remitted {} ", tl.totals[2]),
             Color::Green,
             &tl.remitted,
-            None,
         ),
         (
             q_settled,
             format!(" settled {} (resolved + flagged) ", tl.totals[3]),
             Color::Magenta,
             &tl.settled,
-            None,
         ),
     ];
-    for (quad_area, title, color, data, reference) in quads {
-        let mut datasets = Vec::new();
-        // Reference first, so the series line draws over it.
-        if let Some(reference) = reference {
-            datasets.push(
-                Dataset::default()
-                    .marker(Marker::Braille)
-                    .graph_type(GraphType::Line)
-                    .style(dim)
-                    .data(reference),
-            );
-        }
-        datasets.push(
+    for (quad_area, title, color, data) in quads {
+        let datasets = vec![
             Dataset::default()
                 .marker(Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(color))
                 .data(data),
-        );
+        ];
         let chart = Chart::new(datasets)
             .block(Block::bordered().title(title))
             .x_axis(
