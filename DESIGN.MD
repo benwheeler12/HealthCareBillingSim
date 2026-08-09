@@ -234,6 +234,26 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     Fold-as-you-go with retained event log (live stats + replayable audit).
 11. Scope cuts, named: clearinghouse misrouting to wrong payer; payer crash as distinct
     from infinite latency (indistinguishable in-process — collapsed into 2.1).
+12. **Virtual-time spike findings (build step 1).** (a) `start_paused(true)` requires
+    tokio's `test-util` feature (a main dependency here, not dev-only — the binary
+    itself runs paused) and a **current-thread runtime**: auto-advance does not exist
+    on the multi-thread runtime. Consequence: the simulation is concurrent but
+    single-threaded by construction; "use all cores" applies to CPU-bound work
+    (report generation over snapshots), not the event loop. (b) A `select!` between
+    two timers firing at the same virtual instant picks a branch at random —
+    claim tasks must use `biased;` (response preferred over timeout) to keep the
+    outcome-determinism claim honest. (c) Spike kept as `tests/virtual_time.rs`
+    (permanent regression proof) rather than thrown away — deviation from "throwaway"
+    wording, zero maintenance cost, guards the load-bearing assumption.
+13. **Ledger schema deltas (build step 2).** (a) `ClaimState::Pending` added: ingest
+    and first submission are distinct ledger events, so the record needs a state for
+    the ms-scale gap between them. (b) Identity fields are `Option<ClaimIdentity>`:
+    rejected rows from unparseable lines have no identity to record, and the design
+    requires them to be ledger rows anyway. (c) `LineRecord` carries `do_not_bill`
+    (needed to enforce Decision #9's exclusion from aggregates at report time).
+    (d) Money is a `Money(i64)` newtype in cents (the design offered i64 or
+    rust_decimal; zero-dependency exact integer math wins). Fractional-cent input
+    amounts are schema violations, not rounding candidates.
 
 ## Module layout
 
