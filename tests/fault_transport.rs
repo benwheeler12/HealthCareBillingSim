@@ -9,8 +9,11 @@ use std::time::Duration;
 
 use healthcare_billing_sim::RunConfig;
 use healthcare_billing_sim::biller::policy::RetryPolicy;
+use healthcare_billing_sim::domain::{SubmittedClaim, SubmittedLine};
 use healthcare_billing_sim::ledger::events::ClaimEvent;
 use healthcare_billing_sim::ledger::records::{ClaimState, FlagReason};
+use healthcare_billing_sim::sim::payer::{adjudicate, default_payer_configs};
+use healthcare_billing_sim::sim::rng::RngFactory;
 use healthcare_billing_sim::sim::sim_truth::FaultKind;
 
 /// 2.1: claims dropped on the forward hop are pure silence. The biller's
@@ -254,6 +257,84 @@ fn duplicate_deliveries_apply_at_most_once_and_are_logged() {
                 .filter(|e| matches!(e.event, ClaimEvent::LateRemittance { .. }))
                 .count();
             assert!(logged_dups >= 1, "claim {} dup not logged", record.claim_id);
+        }
+    }
+}
+
+/// 2.5: reordering. There is no mechanism to add — correlation is by
+/// claim_id, never arrival order — so this row is a pure regression test.
+/// Remittances demonstrably arrive out of submission order (mixed payer
+/// latencies guarantee it), and every claim's ledger money still matches
+/// what the pure payer function says *that* claim's payer owes it: no
+/// cross-attachment possible.
+#[test]
+fn scrambled_arrival_order_never_misattaches_remittances() {
+    let input: Vec<String> = (0..30).map(simple_claim).collect();
+    let path = write_input("reorder.jsonl", &input);
+    let seed = 42;
+    let output = run_sim_with(RunConfig::new(path, seed, 10.0));
+
+    // Arrival order really was scrambled relative to submission order.
+    let submitted: Vec<&str> = output
+        .ledger
+        .event_log
+        .iter()
+        .filter(|e| matches!(e.event, ClaimEvent::Submitted { .. }))
+        .map(|e| e.claim_id.0.as_str())
+        .collect();
+    let applied: Vec<&str> = output
+        .ledger
+        .event_log
+        .iter()
+        .filter(|e| matches!(e.event, ClaimEvent::RemittanceApplied { .. }))
+        .map(|e| e.claim_id.0.as_str())
+        .collect();
+    assert_eq!(submitted.len(), applied.len());
+    assert_ne!(
+        submitted, applied,
+        "seed must actually scramble arrival order"
+    );
+
+    // Closed loop: each claim's ledger adjudications equal the pure payer
+    // function's answer for that exact claim — correlation was by id.
+    let rng = RngFactory::new(seed);
+    let payers = default_payer_configs();
+    for record in output.ledger.claims.values() {
+        assert_eq!(record.state, ClaimState::Resolved);
+        let identity = record.identity.as_ref().expect("ingested");
+        let submitted_claim = SubmittedClaim {
+            claim_id: record.claim_id.clone(),
+            payer_id: identity.payer_id,
+            lines: record
+                .lines
+                .iter()
+                .filter(|l| !l.do_not_bill)
+                .map(|l| SubmittedLine {
+                    service_line_id: l.service_line_id.clone(),
+                    procedure_code: l.procedure_code.clone(),
+                    units: l.units,
+                    unit_charge: l.unit_charge,
+                })
+                .collect(),
+        };
+        let expected = adjudicate(&submitted_claim, &payers[&identity.payer_id], &rng);
+        for expected_line in &expected.lines {
+            let line = record
+                .lines
+                .iter()
+                .find(|l| l.service_line_id == expected_line.service_line_id)
+                .expect("line exists");
+            let adj = line.adjudication.as_ref().expect("adjudicated");
+            assert_eq!(
+                adj.payer_paid, expected_line.payer_paid,
+                "claim {}",
+                record.claim_id
+            );
+            assert_eq!(adj.not_allowed, expected_line.not_allowed);
+            assert_eq!(
+                adj.coinsurance + adj.copay + adj.deductible,
+                expected_line.patient_responsibility()
+            );
         }
     }
 }
