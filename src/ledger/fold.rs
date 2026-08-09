@@ -37,10 +37,14 @@ pub async fn run_fold(
         let at = event.at;
         ledger.apply(event);
         events += 1;
-        if let Some(tx) = &progress
-            && events.is_multiple_of(32)
-        {
-            let _ = tx.send(ledger.progress(at));
+        // `% 32` rather than `is_multiple_of` (rustc 1.87+), and a match
+        // rather than a let-chain (rustc 1.88+): the repo builds on 1.85.
+        #[allow(clippy::manual_is_multiple_of)]
+        match &progress {
+            Some(tx) if events % 32 == 0 => {
+                let _ = tx.send(ledger.progress(at));
+            }
+            _ => {}
         }
     }
     if let Some(tx) = &progress {
