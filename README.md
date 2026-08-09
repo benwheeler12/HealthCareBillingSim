@@ -6,11 +6,18 @@ The converged design lives in [DESIGN.MD](DESIGN.MD) (spec + fault table);
 reasoning traces behind the decisions are in
 [docs/RATIONALE.MD](docs/RATIONALE.MD).
 
-**Status: vertical slice.** Happy path runs end-to-end under virtual time with
-zero faults: ingest → validate → per-claim task → clearinghouse → seeded payer
-adjudication → remittance dispatch → exact reconciliation → ledger fold →
-summary report → graceful shutdown. The fault-table burn-down (DESIGN.MD,
-one commit per row) is next.
+**Status: fault table complete.** The full burn-down has landed, one commit
+per fault row (git history reads as the fault table, in order): ingest faults
+(1.1–1.4), transport faults (2.1–2.6: drops both directions, emergent
+timeouts with retry/backoff, late-remittance recovery, duplicates,
+reordering, retry exhaustion), semantic faults (3.1–3.5: dishonest payers,
+corrupt claim ids, partial remittances, full denials, garbage-as-silence),
+and the class-4 architectural invariants (burst ingest loses nothing; a slow
+payer cannot delay other payers). The capstone test runs every fault at once
+and asserts the global guarantee: every ingested claim reaches a terminal
+state — none lost, stuck, or double-counted — deterministically per seed.
+Next: the report suite (AR aging, payer scorecard) and CLI fault-profile
+configuration.
 
 ## Run
 
