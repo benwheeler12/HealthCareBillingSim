@@ -51,14 +51,14 @@ pub fn ar_aging(ledger: &Ledger, now: VirtualTime) -> ArAging {
             continue; // rejected-at-parse rows carry no payer
         };
         let outstanding = record.payer_outstanding();
-        if outstanding > Money::ZERO
-            && let Some(age) = record.age(now)
-        {
-            report
-                .payer
-                .entry(identity.payer_id)
-                .or_default()
-                .add(age, outstanding);
+        if outstanding > Money::ZERO {
+            if let Some(age) = record.age(now) {
+                report
+                    .payer
+                    .entry(identity.payer_id)
+                    .or_default()
+                    .add(age, outstanding);
+            }
         }
         for line in record.lines.iter().filter(|l| l.is_booked()) {
             let adj = line.adjudication.as_ref().expect("booked implies answered");
