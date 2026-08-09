@@ -41,12 +41,13 @@ a static screen — ←/→ to move between Overview, Timeline, AR Aging, Patien
 Scorecard, Denials, Chase, and Diagnostic; ↑/↓ scrolls (or selects rows in
 the chase list); **Enter on a chase-list row opens that claim's full audit
 trail** — every event with virtual timestamps, straight from the
-event-sourced ledger. The **Timeline pane charts the run**: per-virtual-day
-flow rates (ingested, submitted — including retries, so the gap above intake
-is the fault injection made visible — remitted, settled) over a second chart
-of the in-flight backlog, which rises through intake and drains to zero: the
-correctness guarantee as a picture. Both are replayed from the retained
-event log. A live status box pinned to the bottom shows
+event-sourced ledger. The **Timeline pane charts the run**: a 2×2 grid of
+small multiples — per-virtual-day rates for ingested, submitted, remitted,
+and settled on one shared scale, with the ingested line ghosted behind
+submitted so the gap reads as retry traffic (the fault injection made
+visible) — over a chart of the in-flight backlog, which rises through
+intake and drains to zero: the correctness guarantee as a picture. All
+replayed from the retained event log. A live status box pinned to the bottom shows
 claims/resolved/rejected/flagged, the virtual clock, and wall time while the
 run is in flight. `q` quits and prints the plain report so a record stays in
 your scrollback. When stdout is not a terminal (pipes, CI) or with
