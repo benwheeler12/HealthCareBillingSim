@@ -14,25 +14,49 @@ spec, the test matrix, and (deliberately) the git history.
 ## Quickstart
 
 ```sh
-# Honest run over the checked-in sample (2 lines are deliberately malformed):
+# The showcase: 5,000 claims (checked in, ~2% deliberately malformed),
+# every fault class on, submissions spread across ~4 virtual months:
+cargo run -- data/sample_claims_5k.jsonl --preset chaos --rate 0.0005
+
+# Honest run over the small handcrafted sample:
 cargo run -- data/sample_claims.jsonl
 
-# Generate a bigger input, then run the full chaos demo with every report:
-cargo run --bin generate-claims -- 500 --seed 7 --malformed-rate 0.05 --out claims.jsonl
-cargo run -- claims.jsonl --rate 0.00003 --fault-profile data/demo_scenario.json
+# Roll your own input at any size:
+cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out claims.jsonl
 
-# Tests (49) and lints:
+# Tests (52) and lints:
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-CLI: the input file is the single required argument (one PayerClaim JSON
-object per line; schema in `docs/TAKE_HOME_PROMPT.MD`). `--seed` fixes the
-run's outcomes; `--rate` is claims ingested per *virtual* second;
-`--fault-profile` points at a scenario JSON (fault rates, payer personality
-overrides, retry-policy overrides — see `data/demo_scenario.json`);
-`--chase` sizes the chase-list report. Logs go to stderr
-(`RUST_LOG=healthcare_billing_sim=debug` for more); reports go to stdout.
+## CLI
+
+The input file is the single required argument (one PayerClaim JSON object
+per line; schema in `docs/TAKE_HOME_PROMPT.MD`). Everything else is an
+optional flag with a sensible default, and every run starts by printing the
+full parameter set it actually used — seed, rate, retry policy, fault rates,
+payer personalities, and where each value came from.
+
+Configuration layers, later wins: **defaults → `--preset` →
+`--fault-profile` file → individual flags.**
+
+- `--preset honest|messy|chaos` — one-flag demos, from lossless transport to
+  everything-at-once with a slow, denial-happy anthem.
+- `--fault-profile FILE` — scenario JSON for precise control
+  (`data/demo_scenario.json` is a template; unknown fields are rejected).
+- Individual knobs: `--forward-drop-rate`, `--return-drop-rate`,
+  `--duplicate-rate`, `--delay-rate`, `--max-delay-secs`,
+  `--dishonest-rate`, `--line-drop-rate`, `--corrupt-id-rate`,
+  `--garbage-rate`, `--max-attempts`, `--timeout-secs`, `--backoff-secs`.
+- `--seed` reproduces outcomes exactly; `--rate` is claims per *virtual*
+  second (low rates spread submissions across virtual months, which is what
+  makes AR aging interesting); `--chase` sizes the chase list.
+- Long runs show a live progress line (claims/resolved/flagged + the virtual
+  clock) on stderr; disable with `--no-progress`. Colors follow the terminal
+  and `NO_COLOR`; force off with `--no-color`. Reports go to stdout, logs to
+  stderr (`RUST_LOG=healthcare_billing_sim=debug` for the per-claim story).
+- `cargo run -- --help` is grouped by Simulation / Fault injection / Retry
+  policy / Output.
 
 ## Architecture in one screen
 

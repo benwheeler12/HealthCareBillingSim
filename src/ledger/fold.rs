@@ -2,23 +2,76 @@
 //! runtime monitoring, raw log for replay and audit. `apply` is pure state
 //! transition — the async fn is only the channel shell.
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
-use crate::domain::RemittanceAdvice;
+use crate::domain::{RemittanceAdvice, VirtualTime};
 use crate::ledger::events::{ClaimEvent, StampedEvent};
 use crate::ledger::records::{
     Adjudication, ClaimRecord, ClaimState, FlagReason, Ledger, LineRecord,
 };
 
+/// Live counters published by the fold for best-effort observers (the CLI
+/// progress line). This is the "broadcast tap" from the design: the
+/// authoritative path stays the lossless mpsc; watchers may lag or miss
+/// intermediate values and nothing cares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub claims: usize,
+    pub resolved: usize,
+    pub rejected: usize,
+    pub flagged: usize,
+    pub now: VirtualTime,
+}
+
 /// Single consumer of the ledger channel. Returns the final ledger when every
 /// sender has been dropped — which, by shutdown design, means every claim has
-/// reached a terminal state.
-pub async fn run_fold(mut rx: mpsc::Receiver<StampedEvent>) -> Ledger {
+/// reached a terminal state. When a watch sender is supplied, counters are
+/// published every few events (and once at the end).
+pub async fn run_fold(
+    mut rx: mpsc::Receiver<StampedEvent>,
+    progress: Option<watch::Sender<Progress>>,
+) -> Ledger {
     let mut ledger = Ledger::default();
+    let mut events: usize = 0;
     while let Some(event) = rx.recv().await {
+        let at = event.at;
         ledger.apply(event);
+        events += 1;
+        // `% 32` rather than `is_multiple_of` (rustc 1.87+), and a match
+        // rather than a let-chain (rustc 1.88+): the repo builds on 1.85.
+        #[allow(clippy::manual_is_multiple_of)]
+        match &progress {
+            Some(tx) if events % 32 == 0 => {
+                let _ = tx.send(ledger.progress(at));
+            }
+            _ => {}
+        }
+    }
+    if let Some(tx) = &progress {
+        let last = ledger.event_log.last().map(|e| e.at).unwrap_or_default();
+        let _ = tx.send(ledger.progress(last));
     }
     ledger
+}
+
+impl Ledger {
+    /// Cheap counter snapshot — O(claims), called on a sampled cadence.
+    fn progress(&self, now: VirtualTime) -> Progress {
+        let mut p = Progress {
+            claims: self.claims.len(),
+            now,
+            ..Progress::default()
+        };
+        for record in self.claims.values() {
+            match record.state {
+                ClaimState::Resolved => p.resolved += 1,
+                ClaimState::Rejected { .. } => p.rejected += 1,
+                ClaimState::Flagged { .. } => p.flagged += 1,
+                _ => {}
+            }
+        }
+        p
+    }
 }
 
 impl Ledger {
@@ -143,7 +196,7 @@ fn apply_late_remittance(
             adjudicated_at: stamped.at,
         });
     }
-    tracing::info!(claim_id = %record.claim_id, "late remittance resolved a flagged claim");
+    tracing::debug!(claim_id = %record.claim_id, "late remittance resolved a flagged claim");
     record.state = ClaimState::Resolved;
     record.resolved_at = Some(stamped.at);
 }
