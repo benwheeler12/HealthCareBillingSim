@@ -118,7 +118,9 @@ async fn ingest(
         match validation::validate_line(&line) {
             Ok(claim) => {
                 tracing::info!(claim_id = %claim.claim_id, payer = %claim.payer_id, "claim ingested");
-                ledger.emit(claim.claim_id.clone(), ingested_event(&claim)).await;
+                ledger
+                    .emit(claim.claim_id.clone(), ingested_event(&claim))
+                    .await;
                 tasks.spawn(run_claim(claim, deps.clone()));
             }
             Err((claim_id, reason)) => {

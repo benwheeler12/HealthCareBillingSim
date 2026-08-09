@@ -31,10 +31,7 @@ pub fn validate_line(line: &str) -> Result<Claim, (Option<ClaimId>, ValidationEr
     Ok(to_domain(doc))
 }
 
-fn classify_serde_error(
-    line: &str,
-    err: serde_json::Error,
-) -> (Option<ClaimId>, ValidationError) {
+fn classify_serde_error(line: &str, err: serde_json::Error) -> (Option<ClaimId>, ValidationError) {
     if err.is_syntax() || err.is_eof() {
         return (None, ValidationError::Parse(err.to_string()));
     }
@@ -55,15 +52,24 @@ fn semantic_violations(doc: &PayerClaimDoc) -> Vec<String> {
         ));
     }
     if !matches!(doc.patient.gender.as_str(), "m" | "f") {
-        violations.push(format!("patient.gender must match ^(m|f)$, got {:?}", doc.patient.gender));
+        violations.push(format!(
+            "patient.gender must match ^(m|f)$, got {:?}",
+            doc.patient.gender
+        ));
     }
     if !is_iso_date(&doc.patient.dob) {
-        violations.push(format!("patient.dob must be YYYY-MM-DD, got {:?}", doc.patient.dob));
+        violations.push(format!(
+            "patient.dob must be YYYY-MM-DD, got {:?}",
+            doc.patient.dob
+        ));
     }
     for line in &doc.service_lines {
         let id = &line.service_line_id;
         if line.units < 1 {
-            violations.push(format!("service_line {id}: units must be >= 1, got {}", line.units));
+            violations.push(format!(
+                "service_line {id}: units must be >= 1, got {}",
+                line.units
+            ));
         }
         if line.units > u32::MAX as i64 {
             violations.push(format!("service_line {id}: units out of range"));
@@ -115,7 +121,9 @@ fn is_iso_date(s: &str) -> bool {
     b.len() == 10
         && b[4] == b'-'
         && b[7] == b'-'
-        && [0, 1, 2, 3, 5, 6, 8, 9].iter().all(|&i| b[i].is_ascii_digit())
+        && [0, 1, 2, 3, 5, 6, 8, 9]
+            .iter()
+            .all(|&i| b[i].is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -170,7 +178,9 @@ mod tests {
             .replace("1234567890", "12345")
             .replace("123.45", "-1.0");
         let (_, err) = validate_line(&line).unwrap_err();
-        let ValidationError::Schema(violations) = err else { panic!("expected schema error") };
+        let ValidationError::Schema(violations) = err else {
+            panic!("expected schema error")
+        };
         assert_eq!(violations.len(), 2);
     }
 

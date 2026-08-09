@@ -27,7 +27,11 @@ pub enum PayerId {
 }
 
 impl PayerId {
-    pub const ALL: [PayerId; 3] = [PayerId::Medicare, PayerId::UnitedHealthGroup, PayerId::Anthem];
+    pub const ALL: [PayerId; 3] = [
+        PayerId::Medicare,
+        PayerId::UnitedHealthGroup,
+        PayerId::Anthem,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {

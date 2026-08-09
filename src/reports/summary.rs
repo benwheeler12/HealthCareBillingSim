@@ -23,7 +23,10 @@ pub struct Summary {
 }
 
 pub fn summarize(ledger: &Ledger) -> Summary {
-    let mut s = Summary { total_claims: ledger.claims.len(), ..Summary::default() };
+    let mut s = Summary {
+        total_claims: ledger.claims.len(),
+        ..Summary::default()
+    };
     s.quarantined_remittances = ledger.quarantine.len();
     for record in ledger.claims.values() {
         match &record.state {
@@ -52,10 +55,26 @@ impl fmt::Display for Summary {
         writeln!(f, "  rejected at ingest:   {:>8}", self.rejected)?;
         writeln!(f, "  flagged for review:   {:>8}", self.flagged)?;
         writeln!(f, "  non-terminal (BUG!):  {:>8}", self.non_terminal)?;
-        writeln!(f, "quarantined remits:     {:>8}", self.quarantined_remittances)?;
+        writeln!(
+            f,
+            "quarantined remits:     {:>8}",
+            self.quarantined_remittances
+        )?;
         writeln!(f, "billed:                 {:>14}", self.billed.to_string())?;
-        writeln!(f, "  payer paid:           {:>14}", self.payer_paid.to_string())?;
-        writeln!(f, "  patient responsibility:{:>13}", self.patient_responsibility.to_string())?;
-        write!(f, "  not allowed:          {:>14}", self.not_allowed.to_string())
+        writeln!(
+            f,
+            "  payer paid:           {:>14}",
+            self.payer_paid.to_string()
+        )?;
+        writeln!(
+            f,
+            "  patient responsibility:{:>13}",
+            self.patient_responsibility.to_string()
+        )?;
+        write!(
+            f,
+            "  not allowed:          {:>14}",
+            self.not_allowed.to_string()
+        )
     }
 }

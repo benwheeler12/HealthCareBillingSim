@@ -40,7 +40,9 @@ impl Ledger {
                 let record = ClaimRecord {
                     claim_id: stamped.claim_id.clone(),
                     identity: None,
-                    state: ClaimState::Rejected { reason: reason.clone() },
+                    state: ClaimState::Rejected {
+                        reason: reason.clone(),
+                    },
                     attempts: 0,
                     ingested_at: stamped.at,
                     first_submitted_at: None,
@@ -64,10 +66,15 @@ impl Ledger {
         };
         record.history.push(stamped.clone());
         match event {
-            ClaimEvent::Submitted { attempt, timeout_at } => {
+            ClaimEvent::Submitted {
+                attempt,
+                timeout_at,
+            } => {
                 record.attempts = *attempt;
                 record.first_submitted_at.get_or_insert(stamped.at);
-                record.state = ClaimState::AwaitingResponse { timeout_at: *timeout_at };
+                record.state = ClaimState::AwaitingResponse {
+                    timeout_at: *timeout_at,
+                };
             }
             ClaimEvent::RemittanceApplied { lines } => {
                 for (service_line_id, adjudication) in lines {
@@ -85,7 +92,9 @@ impl Ledger {
                 record.resolved_at = Some(stamped.at);
             }
             ClaimEvent::Flagged { reason } => {
-                record.state = ClaimState::Flagged { reason: reason.clone() };
+                record.state = ClaimState::Flagged {
+                    reason: reason.clone(),
+                };
                 record.resolved_at = Some(stamped.at);
             }
             ClaimEvent::LateRemittance => {} // history entry only

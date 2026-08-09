@@ -11,7 +11,11 @@ pub enum ReconcileOutcome {
     /// Complete and exact: the claim is Resolved (even if fully denied — fault 3.4).
     Balanced { lines: Vec<(String, Adjudication)> },
     /// Complete but the money doesn't sum: Flagged(ReconciliationFailed).
-    Unbalanced { lines: Vec<(String, Adjudication)>, billed: Money, accounted: Money },
+    Unbalanced {
+        lines: Vec<(String, Adjudication)>,
+        billed: Money,
+        accounted: Money,
+    },
     /// Unknown or duplicate service lines: Flagged(MalformedRemittance).
     /// TODO(fault 3.3): missing lines should leave the claim partially
     /// adjudicated and aging, not flagged; refine when that row lands.
@@ -19,8 +23,10 @@ pub enum ReconcileOutcome {
 }
 
 pub fn reconcile(claim: &Claim, remit: &RemittanceAdvice, now: VirtualTime) -> ReconcileOutcome {
-    let billable: HashMap<&str, &ServiceLine> =
-        claim.billable_lines().map(|l| (l.service_line_id.as_str(), l)).collect();
+    let billable: HashMap<&str, &ServiceLine> = claim
+        .billable_lines()
+        .map(|l| (l.service_line_id.as_str(), l))
+        .collect();
 
     let mut lines = Vec::with_capacity(remit.lines.len());
     let mut billed_total = Money::ZERO;
@@ -59,11 +65,19 @@ pub fn reconcile(claim: &Claim, remit: &RemittanceAdvice, now: VirtualTime) -> R
 
     if lines.len() < billable.len() {
         return ReconcileOutcome::Malformed {
-            detail: format!("remittance covers {} of {} billable lines", lines.len(), billable.len()),
+            detail: format!(
+                "remittance covers {} of {} billable lines",
+                lines.len(),
+                billable.len()
+            ),
         };
     }
     if !all_balanced {
-        return ReconcileOutcome::Unbalanced { lines, billed: billed_total, accounted: accounted_total };
+        return ReconcileOutcome::Unbalanced {
+            lines,
+            billed: billed_total,
+            accounted: accounted_total,
+        };
     }
     ReconcileOutcome::Balanced { lines }
 }
@@ -107,7 +121,11 @@ mod tests {
     }
 
     fn remit(lines: Vec<RemittanceLine>) -> RemittanceAdvice {
-        RemittanceAdvice { claim_id: ClaimId("c-1".into()), payer_id: PayerId::Medicare, lines }
+        RemittanceAdvice {
+            claim_id: ClaimId("c-1".into()),
+            payer_id: PayerId::Medicare,
+            lines,
+        }
     }
 
     #[test]
@@ -122,16 +140,22 @@ mod tests {
     #[test]
     fn unknown_line_is_malformed() {
         let claim = claim_with_lines(vec![line("L1", 1000, false)]);
-        let outcome =
-            reconcile(&claim, &remit(vec![remit_line("L9", 1000, 0)]), VirtualTime::default());
+        let outcome = reconcile(
+            &claim,
+            &remit(vec![remit_line("L9", 1000, 0)]),
+            VirtualTime::default(),
+        );
         assert!(matches!(outcome, ReconcileOutcome::Malformed { .. }));
     }
 
     #[test]
     fn do_not_bill_lines_are_not_expected_in_the_remittance() {
         let claim = claim_with_lines(vec![line("L1", 1000, false), line("L2", 500, true)]);
-        let outcome =
-            reconcile(&claim, &remit(vec![remit_line("L1", 1000, 0)]), VirtualTime::default());
+        let outcome = reconcile(
+            &claim,
+            &remit(vec![remit_line("L1", 1000, 0)]),
+            VirtualTime::default(),
+        );
         assert!(matches!(outcome, ReconcileOutcome::Balanced { lines } if lines.len() == 1));
     }
 

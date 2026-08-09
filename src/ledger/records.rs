@@ -60,7 +60,10 @@ pub enum ClaimState {
 
 impl ClaimState {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, ClaimState::Rejected { .. } | ClaimState::Resolved | ClaimState::Flagged { .. })
+        matches!(
+            self,
+            ClaimState::Rejected { .. } | ClaimState::Resolved | ClaimState::Flagged { .. }
+        )
     }
 }
 

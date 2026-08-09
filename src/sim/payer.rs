@@ -92,7 +92,11 @@ pub fn adjudicate(claim: &SubmittedClaim, cfg: &PayerConfig, rng: &RngFactory) -
         .iter()
         .map(|line| adjudicate_line(&claim.claim_id, line, cfg, rng))
         .collect();
-    RemittanceAdvice { claim_id: claim.claim_id.clone(), payer_id: claim.payer_id, lines }
+    RemittanceAdvice {
+        claim_id: claim.claim_id.clone(),
+        payer_id: claim.payer_id,
+        lines,
+    }
 }
 
 fn adjudicate_line(

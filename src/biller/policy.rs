@@ -15,6 +15,9 @@ impl Default for RetryPolicy {
     fn default() -> RetryPolicy {
         // Timeout comfortably above the slowest honest payer (anthem, 30s), so
         // the zero-fault path never times out; backoff arrives with fault 2.1.
-        RetryPolicy { max_attempts: 3, timeout: Duration::from_secs(120) }
+        RetryPolicy {
+            max_attempts: 3,
+            timeout: Duration::from_secs(120),
+        }
     }
 }

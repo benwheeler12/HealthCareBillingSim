@@ -90,7 +90,10 @@ mod tests {
 
     #[test]
     fn dollars_convert_exactly_or_not_at_all() {
-        assert_eq!(Money::try_from_dollars(123.45), Some(Money::from_cents(12345)));
+        assert_eq!(
+            Money::try_from_dollars(123.45),
+            Some(Money::from_cents(12345))
+        );
         assert_eq!(Money::try_from_dollars(0.1), Some(Money::from_cents(10)));
         assert_eq!(Money::try_from_dollars(0.0), Some(Money::ZERO));
         assert_eq!(Money::try_from_dollars(1.005), None); // fractional cent
@@ -107,7 +110,10 @@ mod tests {
 
     #[test]
     fn bps_floors_exactly() {
-        assert_eq!(Money::from_cents(10_000).bps(2_500), Money::from_cents(2_500));
+        assert_eq!(
+            Money::from_cents(10_000).bps(2_500),
+            Money::from_cents(2_500)
+        );
         assert_eq!(Money::from_cents(3).bps(3_333), Money::ZERO);
     }
 }

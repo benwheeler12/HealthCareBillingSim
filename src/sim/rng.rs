@@ -33,7 +33,11 @@ impl RngFactory {
     }
 
     pub fn adjudication(&self, claim_id: &ClaimId, decision_point: &str) -> ChaCha8Rng {
-        self.stream(&[b"adjudication", claim_id.0.as_bytes(), decision_point.as_bytes()])
+        self.stream(&[
+            b"adjudication",
+            claim_id.0.as_bytes(),
+            decision_point.as_bytes(),
+        ])
     }
 
     fn stream(&self, parts: &[&[u8]]) -> ChaCha8Rng {
@@ -100,8 +104,14 @@ mod tests {
         let id = ClaimId("c-1".into());
         let base = first_draw(&mut f.adjudication(&id, "latency"));
         assert_ne!(base, first_draw(&mut f.transport(&id, 1, "latency")));
-        assert_ne!(base, first_draw(&mut f.adjudication(&ClaimId("c-2".into()), "latency")));
+        assert_ne!(
+            base,
+            first_draw(&mut f.adjudication(&ClaimId("c-2".into()), "latency"))
+        );
         assert_ne!(base, first_draw(&mut f.adjudication(&id, "line/L1")));
-        assert_ne!(base, first_draw(&mut RngFactory::new(43).adjudication(&id, "latency")));
+        assert_ne!(
+            base,
+            first_draw(&mut RngFactory::new(43).adjudication(&id, "latency"))
+        );
     }
 }

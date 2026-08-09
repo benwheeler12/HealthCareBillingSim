@@ -18,7 +18,9 @@ pub enum DispatcherControl {
         /// never race its own registration across the two dispatcher channels.
         ack: oneshot::Sender<()>,
     },
-    Deregister { claim_id: ClaimId },
+    Deregister {
+        claim_id: ClaimId,
+    },
 }
 
 pub async fn run_dispatcher(
@@ -75,5 +77,7 @@ async fn route(
         return;
     }
     tracing::warn!(%claim_id, "remittance for unknown claim quarantined");
-    ledger.emit(claim_id, ClaimEvent::RemittanceQuarantined).await;
+    ledger
+        .emit(claim_id, ClaimEvent::RemittanceQuarantined)
+        .await;
 }

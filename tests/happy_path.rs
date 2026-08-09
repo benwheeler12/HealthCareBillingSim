@@ -48,20 +48,42 @@ fn write_input(name: &str, lines: &[String]) -> PathBuf {
 
 fn happy_input() -> Vec<String> {
     vec![
-        claim_line("med-1", "medicare", json!([service_line("L1", 2, 123.45, false)])),
+        claim_line(
+            "med-1",
+            "medicare",
+            json!([service_line("L1", 2, 123.45, false)]),
+        ),
         claim_line(
             "med-2",
             "medicare",
-            json!([service_line("L1", 1, 80.00, false), service_line("L2", 3, 42.10, false)]),
+            json!([
+                service_line("L1", 1, 80.00, false),
+                service_line("L2", 3, 42.10, false)
+            ]),
         ),
-        claim_line("uhg-1", "united_health_group", json!([service_line("L1", 1, 250.00, false)])),
+        claim_line(
+            "uhg-1",
+            "united_health_group",
+            json!([service_line("L1", 1, 250.00, false)]),
+        ),
         claim_line(
             "uhg-2",
             "united_health_group",
-            json!([service_line("L1", 4, 55.25, false), service_line("L2", 1, 10.00, true)]),
+            json!([
+                service_line("L1", 4, 55.25, false),
+                service_line("L2", 1, 10.00, true)
+            ]),
         ),
-        claim_line("ant-1", "anthem", json!([service_line("L1", 1, 999.99, false)])),
-        claim_line("ant-2", "anthem", json!([service_line("L1", 2, 75.50, false)])),
+        claim_line(
+            "ant-1",
+            "anthem",
+            json!([service_line("L1", 1, 999.99, false)]),
+        ),
+        claim_line(
+            "ant-2",
+            "anthem",
+            json!([service_line("L1", 2, 75.50, false)]),
+        ),
     ]
 }
 
@@ -71,7 +93,9 @@ fn run_sim(path: PathBuf, seed: u64) -> Ledger {
         .start_paused(true)
         .build()
         .expect("runtime");
-    runtime.block_on(run(RunConfig::new(path, seed, 1.0))).expect("run")
+    runtime
+        .block_on(run(RunConfig::new(path, seed, 1.0)))
+        .expect("run")
 }
 
 /// Comparable fingerprint of every claim's outcome: terminal state plus the
@@ -84,11 +108,25 @@ fn outcomes(ledger: &Ledger) -> BTreeMap<String, String> {
             let money: Vec<String> = record
                 .lines
                 .iter()
-                .map(|l| format!("{}:{:?}", l.service_line_id, l.adjudication.as_ref().map(|a| (
-                    a.payer_paid, a.coinsurance, a.copay, a.deductible, a.not_allowed, a.denial_reason,
-                ))))
+                .map(|l| {
+                    format!(
+                        "{}:{:?}",
+                        l.service_line_id,
+                        l.adjudication.as_ref().map(|a| (
+                            a.payer_paid,
+                            a.coinsurance,
+                            a.copay,
+                            a.deductible,
+                            a.not_allowed,
+                            a.denial_reason,
+                        ))
+                    )
+                })
                 .collect();
-            (record.claim_id.0.clone(), format!("{:?} {}", record.state, money.join(" ")))
+            (
+                record.claim_id.0.clone(),
+                format!("{:?} {}", record.state, money.join(" ")),
+            )
         })
         .collect()
 }
@@ -101,18 +139,33 @@ fn every_claim_reaches_resolved_and_reconciles_exactly() {
     assert_eq!(ledger.claims.len(), 6);
     assert!(ledger.quarantine.is_empty());
     for record in ledger.claims.values() {
-        assert_eq!(record.state, ClaimState::Resolved, "claim {}", record.claim_id);
+        assert_eq!(
+            record.state,
+            ClaimState::Resolved,
+            "claim {}",
+            record.claim_id
+        );
         assert_eq!(record.attempts, 1, "zero faults means no retries");
         assert!(record.first_submitted_at.is_some());
         assert!(record.resolved_at.is_some());
         for line in &record.lines {
             if line.do_not_bill {
-                assert!(line.adjudication.is_none(), "do_not_bill lines are never submitted");
+                assert!(
+                    line.adjudication.is_none(),
+                    "do_not_bill lines are never submitted"
+                );
                 continue;
             }
-            let adj = line.adjudication.as_ref().expect("billable line adjudicated");
+            let adj = line
+                .adjudication
+                .as_ref()
+                .expect("billable line adjudicated");
             let accounted = adj.payer_paid + adj.patient_responsibility() + adj.not_allowed;
-            assert_eq!(line.billed(), accounted, "reconciliation equation, exact, in cents");
+            assert_eq!(
+                line.billed(),
+                accounted,
+                "reconciliation equation, exact, in cents"
+            );
         }
     }
 }
@@ -132,8 +185,12 @@ fn same_seed_same_outcomes_different_seed_diverges() {
 fn malformed_lines_become_rejected_rows_and_do_not_stop_valid_ones() {
     let mut lines = vec![
         "{this is not json".to_string(),
-        claim_line("bad-npi", "medicare", json!([service_line("L1", 1, 10.0, false)]))
-            .replace("1234567890", "123"),
+        claim_line(
+            "bad-npi",
+            "medicare",
+            json!([service_line("L1", 1, 10.0, false)]),
+        )
+        .replace("1234567890", "123"),
     ];
     // Structurally valid JSON, missing the insurance block entirely.
     lines.push(
@@ -158,10 +215,18 @@ fn malformed_lines_become_rejected_rows_and_do_not_stop_valid_ones() {
         .values()
         .filter(|r| matches!(r.state, ClaimState::Rejected { .. }))
         .collect();
-    assert_eq!(rejected.len(), 3, "malformed lines are ledger rows, not silent drops");
+    assert_eq!(
+        rejected.len(),
+        3,
+        "malformed lines are ledger rows, not silent drops"
+    );
     assert!(rejected.iter().any(|r| r.claim_id.0 == "bad-npi"));
     assert!(rejected.iter().any(|r| r.claim_id.0 == "no-insurance"));
-    assert!(rejected.iter().any(|r| r.claim_id.0.starts_with("<unparseable-line-")));
+    assert!(
+        rejected
+            .iter()
+            .any(|r| r.claim_id.0.starts_with("<unparseable-line-"))
+    );
 
     let resolved = ledger
         .claims
@@ -172,6 +237,9 @@ fn malformed_lines_become_rejected_rows_and_do_not_stop_valid_ones() {
 
     // Rejected rows carry no money.
     for record in rejected {
-        assert_eq!(record.lines.iter().map(|l| l.billed()).sum::<Money>(), Money::ZERO);
+        assert_eq!(
+            record.lines.iter().map(|l| l.billed()).sum::<Money>(),
+            Money::ZERO
+        );
     }
 }

@@ -30,7 +30,10 @@ pub async fn run_claim(claim: Claim, deps: ClaimTaskDeps) {
         remit_tx,
         ack: ack_tx,
     };
-    deps.dispatcher_tx.send(register).await.expect("dispatcher gone");
+    deps.dispatcher_tx
+        .send(register)
+        .await
+        .expect("dispatcher gone");
     ack_rx.await.expect("dispatcher dropped registration ack");
 
     let mut state = TaskState::Init;
@@ -50,8 +53,13 @@ pub async fn run_claim(claim: Claim, deps: ClaimTaskDeps) {
         state = drive(state, event, &claim, &deps, &mut deadline).await;
     }
 
-    let deregister = DispatcherControl::Deregister { claim_id: claim.claim_id.clone() };
-    deps.dispatcher_tx.send(deregister).await.expect("dispatcher gone");
+    let deregister = DispatcherControl::Deregister {
+        claim_id: claim.claim_id.clone(),
+    };
+    deps.dispatcher_tx
+        .send(deregister)
+        .await
+        .expect("dispatcher gone");
 }
 
 async fn drive(
@@ -61,14 +69,16 @@ async fn drive(
     deps: &ClaimTaskDeps,
     deadline: &mut Instant,
 ) -> TaskState {
-    let (next_state, actions) =
-        machine::next(state, event, claim, &deps.policy, deps.clock.now());
+    let (next_state, actions) = machine::next(state, event, claim, &deps.policy, deps.clock.now());
     for action in actions {
         match action {
             Action::Submit { attempt } => {
                 *deadline = Instant::now() + deps.policy.timeout;
                 let submission = claim.to_submission(attempt);
-                deps.clearinghouse_tx.send(submission).await.expect("clearinghouse gone");
+                deps.clearinghouse_tx
+                    .send(submission)
+                    .await
+                    .expect("clearinghouse gone");
             }
             Action::Emit(event) => deps.ledger.emit(claim.claim_id.clone(), event).await,
             Action::Finish => {} // loop exit is driven by TaskState::Done

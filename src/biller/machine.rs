@@ -26,7 +26,9 @@ pub enum TaskEvent {
 #[derive(Debug)]
 pub enum Action {
     /// Send the claim to the clearinghouse and arm the response deadline.
-    Submit { attempt: u32 },
+    Submit {
+        attempt: u32,
+    },
     Emit(ClaimEvent),
     Finish,
 }
@@ -48,7 +50,12 @@ pub fn next(
         }
         (TaskState::Awaiting { .. }, TaskEvent::Timeout) => (
             TaskState::Done,
-            vec![Action::Emit(ClaimEvent::Flagged { reason: FlagReason::RetriesExhausted }), Action::Finish],
+            vec![
+                Action::Emit(ClaimEvent::Flagged {
+                    reason: FlagReason::RetriesExhausted,
+                }),
+                Action::Finish,
+            ],
         ),
         // Init never sees network events; Done tasks have left the select loop.
         (state, event) => {
@@ -64,7 +71,10 @@ fn submit(attempt: u32, policy: &RetryPolicy, now: VirtualTime) -> (TaskState, V
         TaskState::Awaiting { attempt },
         vec![
             Action::Submit { attempt },
-            Action::Emit(ClaimEvent::Submitted { attempt, timeout_at }),
+            Action::Emit(ClaimEvent::Submitted {
+                attempt,
+                timeout_at,
+            }),
         ],
     )
 }
@@ -76,7 +86,11 @@ fn settle(outcome: ReconcileOutcome) -> (TaskState, Vec<Action>) {
             Action::Emit(ClaimEvent::Resolved),
             Action::Finish,
         ],
-        ReconcileOutcome::Unbalanced { lines, billed, accounted } => vec![
+        ReconcileOutcome::Unbalanced {
+            lines,
+            billed,
+            accounted,
+        } => vec![
             Action::Emit(ClaimEvent::RemittanceApplied { lines }),
             Action::Emit(ClaimEvent::Flagged {
                 reason: FlagReason::ReconciliationFailed { billed, accounted },
@@ -84,7 +98,9 @@ fn settle(outcome: ReconcileOutcome) -> (TaskState, Vec<Action>) {
             Action::Finish,
         ],
         ReconcileOutcome::Malformed { .. } => vec![
-            Action::Emit(ClaimEvent::Flagged { reason: FlagReason::MalformedRemittance }),
+            Action::Emit(ClaimEvent::Flagged {
+                reason: FlagReason::MalformedRemittance,
+            }),
             Action::Finish,
         ],
     };
@@ -136,8 +152,13 @@ mod tests {
         assert_eq!(state, TaskState::Awaiting { attempt: 1 });
         assert!(matches!(actions[0], Action::Submit { attempt: 1 }));
 
-        let (state, actions) =
-            next(state, TaskEvent::Remittance(balanced_remit()), &claim, &policy, now);
+        let (state, actions) = next(
+            state,
+            TaskEvent::Remittance(balanced_remit()),
+            &claim,
+            &policy,
+            now,
+        );
         assert_eq!(state, TaskState::Done);
         assert!(matches!(actions[1], Action::Emit(ClaimEvent::Resolved)));
         assert!(matches!(actions[2], Action::Finish));
@@ -157,7 +178,9 @@ mod tests {
         assert_eq!(state, TaskState::Done);
         assert!(matches!(
             actions[0],
-            Action::Emit(ClaimEvent::Flagged { reason: FlagReason::RetriesExhausted })
+            Action::Emit(ClaimEvent::Flagged {
+                reason: FlagReason::RetriesExhausted
+            })
         ));
     }
 

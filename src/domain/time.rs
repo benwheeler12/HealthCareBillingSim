@@ -41,7 +41,9 @@ pub struct Clock {
 impl Clock {
     /// Must be called inside the (paused) runtime, at simulation start.
     pub fn start() -> Clock {
-        Clock { start: tokio::time::Instant::now() }
+        Clock {
+            start: tokio::time::Instant::now(),
+        }
     }
 
     pub fn now(&self) -> VirtualTime {

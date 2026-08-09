@@ -9,12 +9,24 @@ use crate::ledger::records::{Adjudication, ClaimIdentity, FlagReason, LineRecord
 
 #[derive(Clone, Debug)]
 pub enum ClaimEvent {
-    Ingested { identity: ClaimIdentity, lines: Vec<LineRecord> },
-    Rejected { reason: ValidationError },
-    Submitted { attempt: u32, timeout_at: VirtualTime },
-    RemittanceApplied { lines: Vec<(String, Adjudication)> },
+    Ingested {
+        identity: ClaimIdentity,
+        lines: Vec<LineRecord>,
+    },
+    Rejected {
+        reason: ValidationError,
+    },
+    Submitted {
+        attempt: u32,
+        timeout_at: VirtualTime,
+    },
+    RemittanceApplied {
+        lines: Vec<(String, Adjudication)>,
+    },
     Resolved,
-    Flagged { reason: FlagReason },
+    Flagged {
+        reason: FlagReason,
+    },
     /// Remittance for a claim the biller has never known (fault 3.2).
     RemittanceQuarantined,
     /// Remittance for a claim already terminal (Decisions #5/#6 territory).
@@ -46,9 +58,16 @@ impl LedgerTx {
     }
 
     pub async fn emit(&self, claim_id: ClaimId, event: ClaimEvent) {
-        let stamped = StampedEvent { at: self.clock.now(), claim_id, event };
+        let stamped = StampedEvent {
+            at: self.clock.now(),
+            claim_id,
+            event,
+        };
         // The fold task outlives every sender by construction (shutdown drains
         // senders first); a send failure would be a wiring bug.
-        self.tx.send(stamped).await.expect("ledger fold task gone while senders alive");
+        self.tx
+            .send(stamped)
+            .await
+            .expect("ledger fold task gone while senders alive");
     }
 }
