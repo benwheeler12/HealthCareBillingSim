@@ -38,8 +38,8 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .start_paused(true)
         .build()?;
-    let ledger = runtime.block_on(run(RunConfig::new(cli.input, cli.seed, cli.rate)))?;
+    let output = runtime.block_on(run(RunConfig::new(cli.input, cli.seed, cli.rate)))?;
 
-    println!("{}", summarize(&ledger));
+    println!("{}", summarize(&output.ledger));
     Ok(())
 }

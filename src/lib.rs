@@ -28,6 +28,7 @@ use crate::sim::clearinghouse::Clearinghouse;
 use crate::sim::faults::FaultProfile;
 use crate::sim::payer::{PayerConfig, default_payer_configs};
 use crate::sim::rng::RngFactory;
+use crate::sim::sim_truth::{SimTruth, run_recorder};
 
 pub struct RunConfig {
     pub input_path: PathBuf,
@@ -52,27 +53,38 @@ impl RunConfig {
     }
 }
 
-/// Run the whole simulation to completion and return the final ledger.
+/// Everything a run produces: the biller's-knowledge ledger and the
+/// simulation's ground truth of injected faults. The gap between the two is
+/// the biller's blind spot — tests use `sim_truth` as the oracle.
+pub struct RunOutput {
+    pub ledger: Ledger,
+    pub sim_truth: SimTruth,
+}
+
+/// Run the whole simulation to completion.
 ///
 /// Must run inside a current-thread runtime with `start_paused(true)`
 /// (Decisions #12). Shutdown is structural: input exhausted + claim-task
 /// JoinSet drained ⇒ channels close in dependency order ⇒ the ledger fold
 /// returns ⇒ done. No shutdown signals anywhere.
-pub async fn run(cfg: RunConfig) -> anyhow::Result<Ledger> {
+pub async fn run(cfg: RunConfig) -> anyhow::Result<RunOutput> {
     let clock = Clock::start();
 
     let (ledger_tx, ledger_rx) = mpsc::channel(1024);
     let (submission_tx, submission_rx) = mpsc::channel(256);
     let (remit_tx, remit_rx) = mpsc::channel(256);
     let (dispatcher_tx, dispatcher_rx) = mpsc::channel(256);
+    let (sim_truth_tx, sim_truth_rx) = mpsc::channel(256);
     let ledger_tx = LedgerTx::new(ledger_tx, clock.clone());
 
     let fold = tokio::spawn(run_fold(ledger_rx));
+    let recorder = tokio::spawn(run_recorder(sim_truth_rx));
     let dispatcher = tokio::spawn(run_dispatcher(dispatcher_rx, remit_rx, ledger_tx.clone()));
     let clearinghouse = Clearinghouse {
         payers: cfg.payers.clone(),
         rng: RngFactory::new(cfg.seed),
         faults: cfg.faults,
+        sim_truth: sim_truth_tx,
     };
     let clearinghouse = tokio::spawn(clearinghouse.run(submission_rx, remit_tx));
 
@@ -93,9 +105,14 @@ pub async fn run(cfg: RunConfig) -> anyhow::Result<Ledger> {
     dispatcher.await.context("dispatcher panicked")?;
     drop(ledger_tx);
     let ledger = fold.await.context("ledger fold panicked")?;
+    let sim_truth = recorder.await.context("sim-truth recorder panicked")?;
 
-    tracing::info!(claims = ledger.claims.len(), "simulation complete");
-    Ok(ledger)
+    tracing::info!(
+        claims = ledger.claims.len(),
+        injected_faults = sim_truth.injected.len(),
+        "simulation complete"
+    );
+    Ok(RunOutput { ledger, sim_truth })
 }
 
 /// Read the input file at the configured rate, validate each line, and spawn
@@ -112,21 +129,43 @@ async fn ingest(
     let interval = Duration::from_secs_f64(1.0 / cfg.rate_per_sec);
 
     let mut tasks = JoinSet::new();
+    let mut seen = std::collections::HashSet::new();
     for (line_no, line) in reader.lines().enumerate() {
         let line = line.context("reading input")?;
+        let line_no = line_no + 1; // 1-based for humans
         tokio::time::sleep(interval).await;
         match validation::validate_line(&line) {
+            // Fault 1.3: a claim_id we've already ingested. First document
+            // wins; the dup becomes a history event, never a resubmission.
+            Ok(claim) if seen.contains(&claim.claim_id) => {
+                tracing::warn!(claim_id = %claim.claim_id, line_no, "duplicate claim_id in input");
+                ledger
+                    .emit(claim.claim_id, ClaimEvent::DuplicateIngest { line_no })
+                    .await;
+            }
+            // Fault 1.4: schema-valid but nothing billable. Policy: resolved
+            // trivially at ingest — correct books with zero submissions.
+            Ok(claim) if claim.billable_lines().count() == 0 => {
+                tracing::info!(claim_id = %claim.claim_id, "no billable lines; trivially resolved");
+                seen.insert(claim.claim_id.clone());
+                ledger
+                    .emit(claim.claim_id.clone(), ingested_event(&claim))
+                    .await;
+                ledger.emit(claim.claim_id, ClaimEvent::Resolved).await;
+            }
             Ok(claim) => {
                 tracing::info!(claim_id = %claim.claim_id, payer = %claim.payer_id, "claim ingested");
+                seen.insert(claim.claim_id.clone());
                 ledger
                     .emit(claim.claim_id.clone(), ingested_event(&claim))
                     .await;
                 tasks.spawn(run_claim(claim, deps.clone()));
             }
             Err((claim_id, reason)) => {
-                let claim_id = claim_id
-                    .unwrap_or_else(|| ClaimId(format!("<unparseable-line-{}>", line_no + 1)));
+                let claim_id =
+                    claim_id.unwrap_or_else(|| ClaimId(format!("<unparseable-line-{line_no}>")));
                 tracing::warn!(%claim_id, ?reason, "claim rejected at ingest");
+                seen.insert(claim_id.clone());
                 ledger.emit(claim_id, ClaimEvent::Rejected { reason }).await;
             }
         }

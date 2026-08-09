@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::domain::{ClaimId, RemittanceAdvice};
+use crate::domain::{ClaimId, Delivery, RemittanceAdvice};
 use crate::ledger::events::{ClaimEvent, LedgerTx};
 
 pub enum DispatcherControl {
@@ -25,7 +25,7 @@ pub enum DispatcherControl {
 
 pub async fn run_dispatcher(
     mut control: mpsc::Receiver<DispatcherControl>,
-    mut remits: mpsc::Receiver<RemittanceAdvice>,
+    mut remits: mpsc::Receiver<Delivery>,
     ledger: LedgerTx,
 ) {
     let mut routes: HashMap<ClaimId, mpsc::Sender<RemittanceAdvice>> = HashMap::new();
@@ -47,7 +47,14 @@ pub async fn run_dispatcher(
                 None => control_open = false,
             },
             msg = remits.recv(), if remits_open => match msg {
-                Some(remit) => route(&mut routes, &mut retired, &ledger, remit).await,
+                Some(delivery) => match delivery {
+                    Delivery::Intact(remit) => {
+                        route(&mut routes, &mut retired, &ledger, remit).await
+                    }
+                    Delivery::Garbage { correlatable } => {
+                        garbage(&routes, &retired, &ledger, correlatable).await
+                    }
+                },
                 None => remits_open = false,
             },
         }
@@ -62,22 +69,56 @@ async fn route(
 ) {
     let claim_id = remit.claim_id.clone();
     if let Some(tx) = routes.get(&claim_id) {
-        if tx.send(remit).await.is_ok() {
-            return;
-        }
         // Receiver gone: the claim task went terminal between our lookup and
         // its Deregister being processed. Same meaning as a late remittance.
+        let mpsc::error::SendError(remit) = match tx.send(remit).await {
+            Ok(()) => return,
+            Err(err) => err,
+        };
         routes.remove(&claim_id);
         retired.insert(claim_id.clone());
-        ledger.emit(claim_id, ClaimEvent::LateRemittance).await;
+        ledger
+            .emit(claim_id, ClaimEvent::LateRemittance { remit })
+            .await;
         return;
     }
     if retired.contains(&claim_id) {
-        ledger.emit(claim_id, ClaimEvent::LateRemittance).await;
+        ledger
+            .emit(claim_id, ClaimEvent::LateRemittance { remit })
+            .await;
         return;
     }
     tracing::warn!(%claim_id, "remittance for unknown claim quarantined");
     ledger
         .emit(claim_id, ClaimEvent::RemittanceQuarantined)
         .await;
+}
+
+/// Fault 3.5: unparseable garbage. Epistemically silence — no financial
+/// content, so the timeout machinery owns recovery. If a claim_id fragment
+/// survived and we know the claim, leave a "garbage received" note in its
+/// history; otherwise quarantine the wreckage.
+async fn garbage(
+    routes: &HashMap<ClaimId, mpsc::Sender<RemittanceAdvice>>,
+    retired: &HashSet<ClaimId>,
+    ledger: &LedgerTx,
+    correlatable: Option<ClaimId>,
+) {
+    match correlatable {
+        Some(claim_id) if routes.contains_key(&claim_id) || retired.contains(&claim_id) => {
+            tracing::warn!(%claim_id, "garbage remittance received; treating as silence");
+            ledger.emit(claim_id, ClaimEvent::GarbageRemittance).await;
+        }
+        Some(claim_id) => {
+            ledger
+                .emit(claim_id, ClaimEvent::RemittanceQuarantined)
+                .await;
+        }
+        None => {
+            let claim_id = ClaimId("<uncorrelatable-garbage>".into());
+            ledger
+                .emit(claim_id, ClaimEvent::RemittanceQuarantined)
+                .await;
+        }
+    }
 }
