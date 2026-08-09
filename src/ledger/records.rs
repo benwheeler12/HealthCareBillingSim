@@ -90,6 +90,24 @@ impl LineRecord {
     pub fn billed(&self) -> Money {
         self.unit_charge * self.units
     }
+
+    /// Answered AND the books balance to the cent. A dishonest answer does
+    /// not book — the money stays outstanding until a human resolves it.
+    pub fn is_booked(&self) -> bool {
+        self.adjudication
+            .as_ref()
+            .is_some_and(|adj| adj.accounted() == self.billed())
+    }
+
+    /// Payer-side A/R for this line: zero once booked; the full billed amount
+    /// while unanswered or in dispute. Derived, never stored (DESIGN.md).
+    pub fn payer_outstanding(&self) -> Money {
+        if self.do_not_bill || self.is_booked() {
+            Money::ZERO
+        } else {
+            self.billed()
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -106,5 +124,27 @@ pub struct Adjudication {
 impl Adjudication {
     pub fn patient_responsibility(&self) -> Money {
         self.coinsurance + self.copay + self.deductible
+    }
+
+    /// Everything the payer accounted for on this line.
+    pub fn accounted(&self) -> Money {
+        self.payer_paid + self.patient_responsibility() + self.not_allowed
+    }
+}
+
+impl ClaimRecord {
+    /// Payer-side A/R across the claim. Zero for Rejected rows (never billed
+    /// to a payer) and for anything fully booked.
+    pub fn payer_outstanding(&self) -> Money {
+        if matches!(self.state, ClaimState::Rejected { .. }) {
+            return Money::ZERO;
+        }
+        self.lines.iter().map(LineRecord::payer_outstanding).sum()
+    }
+
+    /// Age of the receivable: virtual time since FIRST submission — retries
+    /// never make a stuck claim look fresh (DESIGN.md).
+    pub fn age(&self, now: VirtualTime) -> Option<std::time::Duration> {
+        self.first_submitted_at.map(|t| now.saturating_since(t))
     }
 }

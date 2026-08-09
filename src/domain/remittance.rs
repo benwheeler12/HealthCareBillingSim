@@ -38,7 +38,7 @@ impl RemittanceLine {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum DenialReason {
     NotCovered,
     PriorAuthRequired,

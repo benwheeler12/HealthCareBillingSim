@@ -20,6 +20,7 @@ pub struct ClaimTaskDeps {
     pub dispatcher_tx: mpsc::Sender<DispatcherControl>,
 }
 
+#[tracing::instrument(skip_all, fields(claim_id = %claim.claim_id, payer = %claim.payer_id))]
 pub async fn run_claim(claim: Claim, deps: ClaimTaskDeps) {
     // Register before first submit (and await the ack) so the remittance can
     // never beat the routing-map entry.
@@ -48,7 +49,10 @@ pub async fn run_claim(claim: Claim, deps: ClaimTaskDeps) {
             remit = remit_rx.recv() => {
                 TaskEvent::Remittance(remit.expect("dispatcher holds our sender while registered"))
             }
-            _ = tokio::time::sleep_until(deadline) => TaskEvent::Timeout,
+            _ = tokio::time::sleep_until(deadline) => {
+                tracing::debug!("silence past deadline; timeout");
+                TaskEvent::Timeout
+            }
         };
         state = drive(state, event, &claim, &deps, &mut deadline).await;
     }

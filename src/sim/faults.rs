@@ -4,7 +4,8 @@
 //! runs there. Each field is switched on by its fault-table commit
 //! (DESIGN.md classes 2 and 3).
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct FaultProfile {
     /// Fault 2.1: probability a claim is dropped on the biller → payer hop.
     pub forward_drop_rate: f64,

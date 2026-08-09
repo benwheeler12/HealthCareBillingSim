@@ -1,0 +1,24 @@
+{
+  "faults": {
+    "forward_drop_rate": 0.2,
+    "return_drop_rate": 0.1,
+    "duplicate_rate": 0.1,
+    "extra_delay_rate": 0.15,
+    "max_extra_delay_secs": 2592000,
+    "dishonest_adjudication_rate": 0.06,
+    "line_drop_rate": 0.05,
+    "corrupt_claim_id_rate": 0.05,
+    "corrupt_remittance_rate": 0.05
+  },
+  "payers": {
+    "anthem": {
+      "min_response_time_secs": 500.0,
+      "max_response_time_secs": 3000.0,
+      "denial_rate": 0.35
+    }
+  },
+  "policy": {
+    "max_attempts": 2,
+    "timeout_secs": 5000
+  }
+}

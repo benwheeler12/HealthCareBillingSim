@@ -6,6 +6,7 @@ pub mod biller;
 pub mod domain;
 pub mod ledger;
 pub mod reports;
+pub mod scenario;
 pub mod sim;
 
 use std::collections::HashMap;
@@ -20,7 +21,7 @@ use tokio::task::JoinSet;
 use crate::biller::claim_task::{ClaimTaskDeps, run_claim};
 use crate::biller::dispatcher::run_dispatcher;
 use crate::biller::policy::RetryPolicy;
-use crate::domain::{Claim, ClaimId, Clock, PayerId, validation};
+use crate::domain::{Claim, ClaimId, Clock, PayerId, VirtualTime, validation};
 use crate::ledger::events::{ClaimEvent, LedgerTx};
 use crate::ledger::fold::run_fold;
 use crate::ledger::records::{ClaimIdentity, Ledger, LineRecord};
@@ -59,6 +60,8 @@ impl RunConfig {
 pub struct RunOutput {
     pub ledger: Ledger,
     pub sim_truth: SimTruth,
+    /// Virtual time at completion — the `now` every end-of-run report uses.
+    pub finished_at: VirtualTime,
 }
 
 /// Run the whole simulation to completion.
@@ -95,6 +98,7 @@ pub async fn run(cfg: RunConfig) -> anyhow::Result<RunOutput> {
         clearinghouse_tx: submission_tx,
         dispatcher_tx,
     };
+    let clock_for_reports = deps.clock.clone();
     let mut claim_tasks = ingest(&cfg, &ledger_tx, &deps).await?;
     drop(deps);
 
@@ -112,7 +116,11 @@ pub async fn run(cfg: RunConfig) -> anyhow::Result<RunOutput> {
         injected_faults = sim_truth.injected.len(),
         "simulation complete"
     );
-    Ok(RunOutput { ledger, sim_truth })
+    Ok(RunOutput {
+        ledger,
+        sim_truth,
+        finished_at: clock_for_reports.now(),
+    })
 }
 
 /// Read the input file at the configured rate, validate each line, and spawn

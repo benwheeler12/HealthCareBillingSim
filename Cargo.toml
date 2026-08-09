@@ -2,6 +2,7 @@
 name = "healthcare-billing-sim"
 version = "0.1.0"
 edition = "2024"
+default-run = "healthcare-billing-sim"
 
 [dependencies]
 anyhow = "1"
@@ -15,3 +16,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "test-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "generate-claims"
+path = "src/bin/generate_claims.rs"

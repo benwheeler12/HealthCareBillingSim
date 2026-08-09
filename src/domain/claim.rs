@@ -18,7 +18,7 @@ impl fmt::Display for ClaimId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PayerId {
     Medicare,
