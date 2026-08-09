@@ -273,6 +273,11 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     amount stays outstanding — including disputed (dishonest) answers, which a
     practice cannot book. Aging keys off first_submitted_at (payer A/R) and
     adjudicated_at (patient responsibility), per the report section.
+18. **The CLI defaults to the 'messy' fault preset** (CLI polish phase). The
+    assessment says to bake in a little unreliability, so a flag-free run shows
+    drops, duplicates, and delays being survived rather than a sterile happy
+    path. `--preset honest` restores lossless transport. The *library* default
+    (`FaultProfile::default()`) stays all-zero: tests opt into faults explicitly.
 
 ## Module layout
 

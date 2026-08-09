@@ -38,9 +38,12 @@ struct Cli {
     #[arg(long, default_value_t = 1.0, help_heading = "Simulation")]
     rate: f64,
 
-    /// Named fault preset: honest, messy, or chaos.
-    #[arg(long, value_parser = ["honest", "messy", "chaos"], help_heading = "Simulation")]
-    preset: Option<String>,
+    /// Named fault preset. The default is 'messy' — real clearinghouses lose
+    /// things, so a plain run shows drops, duplicates, and delays being
+    /// survived. 'honest' is the lossless baseline; 'chaos' is everything at
+    /// once.
+    #[arg(long, default_value = "messy", value_parser = ["honest", "messy", "chaos"], help_heading = "Simulation")]
+    preset: String,
 
     /// Scenario file (JSON): fault rates, payer personality overrides,
     /// retry-policy overrides. See data/demo_scenario.json.
@@ -187,14 +190,11 @@ fn main() -> anyhow::Result<()> {
 /// plus a human-readable description of where it came from.
 fn build_config(cli: &Cli) -> anyhow::Result<(RunConfig, Vec<String>)> {
     let mut cfg = RunConfig::new(cli.input.clone(), cli.seed, cli.rate);
-    let mut provenance = vec!["defaults".to_string()];
+    let mut provenance = vec![format!("preset '{}'", cli.preset)];
 
-    if let Some(name) = &cli.preset {
-        scenario::preset(name)
-            .expect("clap validated the preset name")
-            .apply(&mut cfg);
-        provenance.push(format!("preset '{name}'"));
-    }
+    scenario::preset(&cli.preset)
+        .expect("clap validated the preset name")
+        .apply(&mut cfg);
     if let Some(path) = &cli.fault_profile {
         scenario::load(path)?.apply(&mut cfg);
         provenance.push(format!("scenario file {}", path.display()));
@@ -299,9 +299,9 @@ fn fault_summary(cfg: &RunConfig) -> String {
     }
     if f.extra_delay_rate > 0.0 {
         parts.push(format!(
-            "delays {} (≤{:.1} virtual days)",
+            "delays {} (≤{})",
             pct(f.extra_delay_rate),
-            f.max_extra_delay_secs / 86_400.0
+            human_virtual(f.max_extra_delay_secs)
         ));
     }
     if f.dishonest_adjudication_rate > 0.0 {
