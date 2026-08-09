@@ -429,63 +429,95 @@ fn timeline(
 
 fn draw_timeline(frame: &mut ratatui::Frame, area: Rect, done: &Done) {
     let tl = &done.timeline;
-    let [rates_area, flight_area] =
-        Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(area);
+    let half = [Constraint::Percentage(50), Constraint::Percentage(50)];
+    let [rates_area, flight_area] = Layout::vertical(half).areas(area);
+    let [row1, row2] = Layout::vertical(half).areas(rates_area);
+    let [q_ingested, q_submitted] = Layout::horizontal(half).areas(row1);
+    let [q_remitted, q_settled] = Layout::horizontal(half).areas(row2);
 
     let dim = Style::default().fg(Color::DarkGray);
-    let x_axis = || {
-        Axis::default()
-            .title("virtual days")
-            .style(dim)
-            .bounds([0.0, tl.end_day])
-            .labels(vec![
-                "0".to_string(),
-                format!("{:.0}", tl.end_day / 2.0),
-                format!("{:.0}d", tl.end_day),
-            ])
-    };
 
+    // Small multiples on one shared y scale, so rates compare across charts
+    // at a glance. Submitted carries the ingested line ghosted behind it —
+    // the gap between them is the retry traffic.
     let rate_top = (tl.max_rate * 1.15).max(1.0);
-    let series = [
-        ("ingested", Color::Cyan, &tl.ingested, tl.totals[0]),
-        ("submitted", Color::Yellow, &tl.submitted, tl.totals[1]),
-        ("remitted", Color::Green, &tl.remitted, tl.totals[2]),
-        ("settled", Color::Magenta, &tl.settled, tl.totals[3]),
+    let quads = [
+        (
+            q_ingested,
+            format!(
+                " ingested {} · each point ≈ {} ",
+                tl.totals[0],
+                human_virtual(tl.bucket_secs)
+            ),
+            Color::Cyan,
+            &tl.ingested,
+            None,
+        ),
+        (
+            q_submitted,
+            format!(
+                " submitted {} · dim = ingested, gap = retries ",
+                tl.totals[1]
+            ),
+            Color::Yellow,
+            &tl.submitted,
+            Some(&tl.ingested),
+        ),
+        (
+            q_remitted,
+            format!(" remitted {} ", tl.totals[2]),
+            Color::Green,
+            &tl.remitted,
+            None,
+        ),
+        (
+            q_settled,
+            format!(" settled {} (resolved + flagged) ", tl.totals[3]),
+            Color::Magenta,
+            &tl.settled,
+            None,
+        ),
     ];
-    let datasets: Vec<Dataset> = series
-        .iter()
-        .map(|&(name, color, data, total)| {
+    for (quad_area, title, color, data, reference) in quads {
+        let mut datasets = Vec::new();
+        // Reference first, so the series line draws over it.
+        if let Some(reference) = reference {
+            datasets.push(
+                Dataset::default()
+                    .marker(Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(dim)
+                    .data(reference),
+            );
+        }
+        datasets.push(
             Dataset::default()
-                .name(format!("{name} {total}"))
                 .marker(Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(color))
-                .data(data)
-        })
-        .collect();
-    // The default legend hides itself above 1/4 of the chart area; four
-    // series need the headroom, and the legend is the colors' only key.
-    let legend_room = (Constraint::Ratio(1, 2), Constraint::Ratio(1, 2));
-    let rates = Chart::new(datasets)
-        .hidden_legend_constraints(legend_room)
-        .block(Block::bordered().title(format!(
-            " Flow — events per virtual day · each point ≈ {} ",
-            human_virtual(tl.bucket_secs)
-        )))
-        .x_axis(x_axis())
-        .y_axis(
-            Axis::default()
-                .title("per day")
-                .style(dim)
-                .bounds([0.0, rate_top])
-                .labels(vec![
-                    "0".to_string(),
-                    fmt_axis(rate_top / 2.0),
-                    fmt_axis(rate_top),
-                ]),
+                .data(data),
         );
-    frame.render_widget(rates, rates_area);
+        let chart = Chart::new(datasets)
+            .block(Block::bordered().title(title))
+            .x_axis(
+                Axis::default()
+                    .style(dim)
+                    .bounds([0.0, tl.end_day])
+                    .labels(vec!["0".to_string(), format!("{:.0}d", tl.end_day)]),
+            )
+            .y_axis(
+                Axis::default()
+                    .title("per day")
+                    .style(dim)
+                    .bounds([0.0, rate_top])
+                    .labels(vec!["0".to_string(), fmt_axis(rate_top)]),
+            );
+        frame.render_widget(chart, quad_area);
+    }
 
+    // The default legend hides itself above 1/4 of the chart area; the
+    // legend is the intake-end marker's only key, so give it headroom.
+    let legend_room = (Constraint::Ratio(1, 2), Constraint::Ratio(1, 2));
     let flight_top = (tl.max_in_flight * 1.15).max(1.0);
     let intake_marker = [(tl.intake_end_day, 0.0), (tl.intake_end_day, flight_top)];
     let flight_sets = vec![
@@ -508,7 +540,17 @@ fn draw_timeline(frame: &mut ratatui::Frame, area: Rect, done: &Done) {
             Block::bordered()
                 .title(" Backlog — claims in flight (ingested − settled) · drains to zero "),
         )
-        .x_axis(x_axis())
+        .x_axis(
+            Axis::default()
+                .title("virtual days")
+                .style(dim)
+                .bounds([0.0, tl.end_day])
+                .labels(vec![
+                    "0".to_string(),
+                    format!("{:.0}", tl.end_day / 2.0),
+                    format!("{:.0}d", tl.end_day),
+                ]),
+        )
         .y_axis(
             Axis::default()
                 .title("open")

@@ -311,10 +311,12 @@ Class 4 — reclassified as **architectural invariants**, not faults:
 
 22. **Timeline pane: the event log replayed as charts.** The retained raw
     event log (Decisions on ledger schema; every event stamped with virtual
-    time) is bucketed into fixed windows and rendered as two stacked charts:
-    per-virtual-day flow rates for ingested / submitted / remitted / settled,
-    and the in-flight backlog (cumulative ingested minus settled) with an
-    intake-end marker. Series chosen for what they *prove*: submitted minus
+    time) is bucketed into fixed windows and rendered as a 2×2 grid of small
+    multiples — per-virtual-day rates for ingested / submitted / remitted /
+    settled, one chart each on a shared y scale (four overlaid lines proved
+    unreadable at terminal resolution), with the ingested line ghosted
+    behind submitted so the retry gap stays visible — above the in-flight
+    backlog (cumulative ingested minus settled) with an intake-end marker. Series chosen for what they *prove*: submitted minus
     ingested is retry traffic — the fault injection made visible; the backlog
     draining to exactly zero is the every-claim-terminal guarantee as a
     picture. Rejected/duplicate/quarantine/garbage/late events are excluded —
