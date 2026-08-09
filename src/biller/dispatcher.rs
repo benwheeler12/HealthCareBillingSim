@@ -88,7 +88,7 @@ async fn route(
             .await;
         return;
     }
-    tracing::warn!(%claim_id, "remittance for unknown claim quarantined");
+    tracing::debug!(%claim_id, "remittance for unknown claim quarantined");
     ledger
         .emit(claim_id, ClaimEvent::RemittanceQuarantined)
         .await;
@@ -106,7 +106,7 @@ async fn garbage(
 ) {
     match correlatable {
         Some(claim_id) if routes.contains_key(&claim_id) || retired.contains(&claim_id) => {
-            tracing::warn!(%claim_id, "garbage remittance received; treating as silence");
+            tracing::debug!(%claim_id, "garbage remittance received; treating as silence");
             ledger.emit(claim_id, ClaimEvent::GarbageRemittance).await;
         }
         Some(claim_id) => {

@@ -67,6 +67,36 @@ pub fn load(path: &Path) -> anyhow::Result<Scenario> {
 }
 
 impl Scenario {
+    /// Public validation entry for scenarios built in code (CLI flags).
+    pub fn validated(&self) -> anyhow::Result<()> {
+        self.validate()
+    }
+
+    /// How many individual overrides this scenario carries (payer patches
+    /// count once each).
+    pub fn count_set(&self) -> usize {
+        let f = &self.faults;
+        let p = &self.policy;
+        [
+            f.forward_drop_rate.is_some(),
+            f.return_drop_rate.is_some(),
+            f.extra_delay_rate.is_some(),
+            f.max_extra_delay_secs.is_some(),
+            f.duplicate_rate.is_some(),
+            f.dishonest_adjudication_rate.is_some(),
+            f.line_drop_rate.is_some(),
+            f.corrupt_claim_id_rate.is_some(),
+            f.corrupt_remittance_rate.is_some(),
+            p.max_attempts.is_some(),
+            p.timeout_secs.is_some(),
+            p.backoff_base_secs.is_some(),
+        ]
+        .iter()
+        .filter(|set| **set)
+        .count()
+            + self.payers.len()
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         let f = &self.faults;
         for (name, rate) in [
@@ -156,6 +186,58 @@ fn set<T: Copy>(target: &mut T, patch: Option<T>) {
     }
 }
 
+/// Built-in presets for one-flag demos. Precedence in the CLI: defaults →
+/// preset → `--fault-profile` file → individual flags.
+pub fn preset(name: &str) -> Option<Scenario> {
+    let mut scenario = Scenario::default();
+    match name {
+        // Honest, lossless adversary — the defaults, spelled out.
+        "honest" => {}
+        // Everyday clearinghouse weather: losses and lag, all recoverable.
+        "messy" => {
+            scenario.faults = FaultPatch {
+                forward_drop_rate: Some(0.15),
+                return_drop_rate: Some(0.10),
+                duplicate_rate: Some(0.10),
+                extra_delay_rate: Some(0.15),
+                max_extra_delay_secs: Some(600.0),
+                ..FaultPatch::default()
+            };
+        }
+        // Everything at once, month-scale delays, a slow denial-happy anthem,
+        // and a tight retry budget: fills every report.
+        "chaos" => {
+            scenario.faults = FaultPatch {
+                forward_drop_rate: Some(0.20),
+                return_drop_rate: Some(0.10),
+                duplicate_rate: Some(0.10),
+                extra_delay_rate: Some(0.15),
+                max_extra_delay_secs: Some(2_592_000.0), // 30 virtual days
+                dishonest_adjudication_rate: Some(0.06),
+                line_drop_rate: Some(0.05),
+                corrupt_claim_id_rate: Some(0.05),
+                corrupt_remittance_rate: Some(0.05),
+            };
+            scenario.payers.insert(
+                PayerId::Anthem,
+                PayerPatch {
+                    min_response_time_secs: Some(500.0),
+                    max_response_time_secs: Some(3000.0),
+                    denial_rate: Some(0.35),
+                    ..PayerPatch::default()
+                },
+            );
+            scenario.policy = PolicyPatch {
+                max_attempts: Some(2),
+                timeout_secs: Some(5000.0),
+                ..PolicyPatch::default()
+            };
+        }
+        _ => return None,
+    }
+    Some(scenario)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +263,19 @@ mod tests {
         assert_eq!(anthem.min_response_time_secs, 100.0);
         assert_eq!(anthem.max_response_time_secs, default_anthem_max);
         assert_eq!(cfg.policy.max_attempts, 2);
+    }
+
+    #[test]
+    fn presets_resolve_and_apply() {
+        assert!(preset("nonsense").is_none());
+        assert_eq!(preset("honest").expect("honest").count_set(), 0);
+
+        let chaos = preset("chaos").expect("chaos");
+        let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);
+        chaos.apply(&mut cfg);
+        assert!(cfg.faults.forward_drop_rate > 0.0);
+        assert_eq!(cfg.policy.max_attempts, 2);
+        assert!(cfg.payers[&PayerId::Anthem].denial_rate > 0.3);
     }
 
     #[test]

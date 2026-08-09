@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::biller::claim_task::{ClaimTaskDeps, run_claim};
@@ -23,7 +23,7 @@ use crate::biller::dispatcher::run_dispatcher;
 use crate::biller::policy::RetryPolicy;
 use crate::domain::{Claim, ClaimId, Clock, PayerId, VirtualTime, validation};
 use crate::ledger::events::{ClaimEvent, LedgerTx};
-use crate::ledger::fold::run_fold;
+use crate::ledger::fold::{Progress, run_fold};
 use crate::ledger::records::{ClaimIdentity, Ledger, LineRecord};
 use crate::sim::clearinghouse::Clearinghouse;
 use crate::sim::faults::FaultProfile;
@@ -39,6 +39,8 @@ pub struct RunConfig {
     pub policy: RetryPolicy,
     pub payers: HashMap<PayerId, PayerConfig>,
     pub faults: FaultProfile,
+    /// Optional live-counter tap for progress display; None in tests.
+    pub progress: Option<watch::Sender<Progress>>,
 }
 
 impl RunConfig {
@@ -50,6 +52,7 @@ impl RunConfig {
             policy: RetryPolicy::default(),
             payers: default_payer_configs(),
             faults: FaultProfile::default(),
+            progress: None,
         }
     }
 }
@@ -70,7 +73,7 @@ pub struct RunOutput {
 /// (Decisions #12). Shutdown is structural: input exhausted + claim-task
 /// JoinSet drained ⇒ channels close in dependency order ⇒ the ledger fold
 /// returns ⇒ done. No shutdown signals anywhere.
-pub async fn run(cfg: RunConfig) -> anyhow::Result<RunOutput> {
+pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
     let clock = Clock::start();
 
     let (ledger_tx, ledger_rx) = mpsc::channel(1024);
@@ -80,7 +83,7 @@ pub async fn run(cfg: RunConfig) -> anyhow::Result<RunOutput> {
     let (sim_truth_tx, sim_truth_rx) = mpsc::channel(256);
     let ledger_tx = LedgerTx::new(ledger_tx, clock.clone());
 
-    let fold = tokio::spawn(run_fold(ledger_rx));
+    let fold = tokio::spawn(run_fold(ledger_rx, cfg.progress.take()));
     let recorder = tokio::spawn(run_recorder(sim_truth_rx));
     let dispatcher = tokio::spawn(run_dispatcher(dispatcher_rx, remit_rx, ledger_tx.clone()));
     let clearinghouse = Clearinghouse {
@@ -146,7 +149,7 @@ async fn ingest(
             // Fault 1.3: a claim_id we've already ingested. First document
             // wins; the dup becomes a history event, never a resubmission.
             Ok(claim) if seen.contains(&claim.claim_id) => {
-                tracing::warn!(claim_id = %claim.claim_id, line_no, "duplicate claim_id in input");
+                tracing::debug!(claim_id = %claim.claim_id, line_no, "duplicate claim_id in input");
                 ledger
                     .emit(claim.claim_id, ClaimEvent::DuplicateIngest { line_no })
                     .await;
@@ -154,7 +157,7 @@ async fn ingest(
             // Fault 1.4: schema-valid but nothing billable. Policy: resolved
             // trivially at ingest — correct books with zero submissions.
             Ok(claim) if claim.billable_lines().count() == 0 => {
-                tracing::info!(claim_id = %claim.claim_id, "no billable lines; trivially resolved");
+                tracing::debug!(claim_id = %claim.claim_id, "no billable lines; trivially resolved");
                 seen.insert(claim.claim_id.clone());
                 ledger
                     .emit(claim.claim_id.clone(), ingested_event(&claim))
@@ -162,7 +165,7 @@ async fn ingest(
                 ledger.emit(claim.claim_id, ClaimEvent::Resolved).await;
             }
             Ok(claim) => {
-                tracing::info!(claim_id = %claim.claim_id, payer = %claim.payer_id, "claim ingested");
+                tracing::debug!(claim_id = %claim.claim_id, payer = %claim.payer_id, "claim ingested");
                 seen.insert(claim.claim_id.clone());
                 ledger
                     .emit(claim.claim_id.clone(), ingested_event(&claim))
@@ -172,7 +175,7 @@ async fn ingest(
             Err((claim_id, reason)) => {
                 let claim_id =
                     claim_id.unwrap_or_else(|| ClaimId(format!("<unparseable-line-{line_no}>")));
-                tracing::warn!(%claim_id, ?reason, "claim rejected at ingest");
+                tracing::debug!(%claim_id, ?reason, "claim rejected at ingest");
                 seen.insert(claim_id.clone());
                 ledger.emit(claim_id, ClaimEvent::Rejected { reason }).await;
             }
