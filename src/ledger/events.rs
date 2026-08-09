@@ -34,6 +34,9 @@ pub enum ClaimEvent {
     },
     /// Remittance for a claim the biller has never known (fault 3.2).
     RemittanceQuarantined,
+    /// Fault 3.5: unparseable garbage whose claim_id fragment correlated to a
+    /// known claim. History note only — epistemically this is silence.
+    GarbageRemittance,
     /// Remittance for a claim already terminal. Carries the full remittance:
     /// on a Resolved claim it is ignored (logged idempotency, Decisions #5);
     /// on Flagged(RetriesExhausted), a complete, balanced late answer is

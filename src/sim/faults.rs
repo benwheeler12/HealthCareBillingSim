@@ -24,4 +24,7 @@ pub struct FaultProfile {
     pub line_drop_rate: f64,
     /// Fault 3.2: probability a remittance's claim_id is mangled in transit.
     pub corrupt_claim_id_rate: f64,
+    /// Fault 3.5: probability a remittance turns to unparseable garbage in
+    /// transit. Epistemically silence (Decisions #8); timeout machinery owns it.
+    pub corrupt_remittance_rate: f64,
 }

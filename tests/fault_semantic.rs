@@ -199,3 +199,67 @@ fn missing_lines_stay_partial_and_accumulate_across_retries() {
         "seed must exercise partial-then-complete accumulation"
     );
 }
+
+/// 3.5: the remittance turns to unparseable garbage in transit. Epistemically
+/// that is silence (Decisions #8) — the timeout machinery owns recovery — but
+/// a surviving claim_id fragment earns a "garbage received" history note,
+/// and uncorrelatable wreckage lands in quarantine.
+#[test]
+fn garbage_remittances_are_silence_with_a_history_note() {
+    let input: Vec<String> = (0..30).map(simple_claim).collect();
+    let path = write_input("garbage.jsonl", &input);
+    let mut cfg = RunConfig::new(path, 42, 10.0);
+    cfg.faults.corrupt_remittance_rate = 0.3;
+
+    let output = run_sim_with(cfg);
+    let corrupted = output.sim_truth.claims_with(FaultKind::CorruptRemittance);
+    assert!(
+        !corrupted.is_empty(),
+        "seed must actually corrupt remittances"
+    );
+
+    let noted: usize = output
+        .ledger
+        .claims
+        .values()
+        .map(|r| {
+            r.history
+                .iter()
+                .filter(|e| matches!(e.event, ClaimEvent::GarbageRemittance))
+                .count()
+        })
+        .sum();
+    let quarantined = output.ledger.quarantine.len();
+    assert_eq!(
+        noted + quarantined,
+        output.sim_truth.count(FaultKind::CorruptRemittance),
+        "every garbage delivery is either noted on its claim or quarantined"
+    );
+    assert!(noted > 0, "seed must produce correlatable garbage");
+    assert!(quarantined > 0, "seed must produce uncorrelatable garbage");
+
+    let mut recovered = 0;
+    for record in output.ledger.claims.values() {
+        assert!(
+            record.state.is_terminal(),
+            "claim {} stuck",
+            record.claim_id
+        );
+        // No garbage ever carries money: any adjudication present is balanced.
+        for line in record.lines.iter().filter(|l| l.adjudication.is_some()) {
+            let adj = line.adjudication.as_ref().expect("checked");
+            assert_eq!(
+                line.billed(),
+                adj.payer_paid + adj.patient_responsibility() + adj.not_allowed
+            );
+        }
+        if corrupted.contains(&record.claim_id) && record.state == ClaimState::Resolved {
+            assert!(record.attempts > 1, "recovery must have come from a retry");
+            recovered += 1;
+        }
+    }
+    assert!(
+        recovered > 0,
+        "at least one garbage-struck claim must recover"
+    );
+}

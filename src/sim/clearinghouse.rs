@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use rand::Rng;
 use tokio::sync::mpsc;
 
-use crate::domain::{ClaimId, PayerId, RemittanceAdvice, Submission, SubmittedClaim};
+use crate::domain::{ClaimId, Delivery, PayerId, Submission, SubmittedClaim};
 use crate::sim::faults::FaultProfile;
 use crate::sim::payer::{self, PayerConfig};
 use crate::sim::rng::RngFactory;
@@ -27,9 +27,9 @@ impl Clearinghouse {
     pub async fn run(
         self,
         mut submissions: mpsc::Receiver<Submission>,
-        remits_out: mpsc::Sender<RemittanceAdvice>,
+        remits_out: mpsc::Sender<Delivery>,
     ) {
-        let (return_tx, mut return_rx) = mpsc::channel::<RemittanceAdvice>(64);
+        let (return_tx, mut return_rx) = mpsc::channel::<Delivery>(64);
 
         loop {
             tokio::select! {
@@ -37,22 +37,22 @@ impl Clearinghouse {
                     Some(submission) => self.deliver(submission, return_tx.clone()).await,
                     None => break, // biller side done submitting
                 },
-                Some(remit) = return_rx.recv() => forward(&remits_out, remit).await,
+                Some(delivery) = return_rx.recv() => forward(&remits_out, delivery).await,
             }
         }
 
         // Drain in-flight payer tasks; the channel closes once the last payer
         // task drops its return sender.
         drop(return_tx);
-        while let Some(remit) = return_rx.recv().await {
-            forward(&remits_out, remit).await;
+        while let Some(delivery) = return_rx.recv().await {
+            forward(&remits_out, delivery).await;
         }
     }
 
     /// Forward hop: biller → payer. A drop here means the payer never saw the
     /// claim (fault 2.1) — pure silence, indistinguishable to the biller from
     /// every other kind of loss.
-    async fn deliver(&self, submission: Submission, return_tx: mpsc::Sender<RemittanceAdvice>) {
+    async fn deliver(&self, submission: Submission, return_tx: mpsc::Sender<Delivery>) {
         let claim_id = submission.claim.claim_id.clone();
         let attempt = submission.attempt;
 
@@ -98,7 +98,7 @@ impl Clearinghouse {
         claim: SubmittedClaim,
         attempt: u32,
         cfg: PayerConfig,
-        return_tx: mpsc::Sender<RemittanceAdvice>,
+        return_tx: mpsc::Sender<Delivery>,
     ) {
         let rng = self.rng;
         let faults = self.faults;
@@ -165,6 +165,34 @@ impl Clearinghouse {
                 }
             }
 
+            // Fault 3.5: the whole remittance turns to garbage in transit.
+            // Nothing financial survives; sometimes a claim_id fragment does.
+            if chance(
+                &rng,
+                &claim.claim_id,
+                attempt,
+                "return/corrupt",
+                faults.corrupt_remittance_rate,
+            ) {
+                record_fault(
+                    &sim_truth,
+                    &claim.claim_id,
+                    attempt,
+                    FaultKind::CorruptRemittance,
+                )
+                .await;
+                let correlatable = chance(
+                    &rng,
+                    &claim.claim_id,
+                    attempt,
+                    "return/corrupt_readable",
+                    0.5,
+                )
+                .then(|| claim.claim_id.clone());
+                let _ = return_tx.send(Delivery::Garbage { correlatable }).await;
+                return;
+            }
+
             // Fault 3.2: claim_id mangled in transit — the remittance will
             // reach the biller but can never correlate; the real claim hears
             // only silence.
@@ -186,7 +214,7 @@ impl Clearinghouse {
             }
 
             // Send failure means the clearinghouse itself is gone — shutdown.
-            let _ = return_tx.send(remit).await;
+            let _ = return_tx.send(Delivery::Intact(remit)).await;
         });
     }
 
@@ -210,8 +238,8 @@ async fn record_fault(
     let _ = sim_truth.send(fault).await;
 }
 
-async fn forward(remits_out: &mpsc::Sender<RemittanceAdvice>, remit: RemittanceAdvice) {
-    let _ = remits_out.send(remit).await;
+async fn forward(remits_out: &mpsc::Sender<Delivery>, delivery: Delivery) {
+    let _ = remits_out.send(delivery).await;
 }
 
 /// One transport-fate draw: keyed by (seed, claim_id, attempt, point), so the

@@ -2,6 +2,17 @@
 
 use crate::domain::claim::{Claim, ClaimId, PayerId};
 use crate::domain::money::Money;
+use crate::domain::remittance::RemittanceAdvice;
+
+/// What the clearinghouse actually hands the biller on the return hop.
+/// Fault 3.5 can turn a remittance into unparseable garbage in transit;
+/// epistemically that is silence (Decisions #8) — the timeout machinery owns
+/// it — but a correlatable claim_id fragment still earns a history note.
+#[derive(Clone, Debug)]
+pub enum Delivery {
+    Intact(RemittanceAdvice),
+    Garbage { correlatable: Option<ClaimId> },
+}
 
 /// What actually goes over the wire to the clearinghouse: billable lines only
 /// (Decisions #9), plus the attempt number so transport-fault RNG streams can

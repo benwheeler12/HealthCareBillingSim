@@ -102,6 +102,7 @@ impl Ledger {
             }
             ClaimEvent::LateRemittance { remit } => apply_late_remittance(record, remit, stamped),
             ClaimEvent::DuplicateIngest { .. } => {} // history entry only; first doc wins
+            ClaimEvent::GarbageRemittance => {}      // history entry only; silence owns it
             ClaimEvent::Ingested { .. }
             | ClaimEvent::Rejected { .. }
             | ClaimEvent::RemittanceQuarantined => unreachable!("handled in apply"),
