@@ -148,6 +148,19 @@ fn draw_denial_reason(rng: &mut impl Rng) -> DenialReason {
     }
 }
 
+/// Fault 3.1: dishonest mode. Keyed by the adjudication family (no attempt),
+/// so a re-delivered claim reproduces the identical *lie* — duplicates stay
+/// consistent, and the biller's only defense is the reconciliation equation.
+/// Inflating not_allowed guarantees the books cannot sum, whatever the line's
+/// honest split was.
+pub fn apply_dishonesty(remit: &mut RemittanceAdvice, rng: &RngFactory) {
+    let mut rng = rng.adjudication(&remit.claim_id, "dishonest/skim");
+    let Some(line) = remit.lines.first_mut() else {
+        return;
+    };
+    line.not_allowed += Money::from_cents(rng.random_range(1..=99));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -105,7 +105,18 @@ impl Clearinghouse {
         let sim_truth = self.sim_truth.clone();
         tokio::spawn(async move {
             tokio::time::sleep(payer::latency(&cfg, &rng, &claim.claim_id)).await;
-            let remit = payer::adjudicate(&claim, &cfg, &rng);
+            let mut remit = payer::adjudicate(&claim, &cfg, &rng);
+
+            // Fault 3.1: dishonest adjudication. Adjudication-family key — the
+            // lie is reproduced identically on re-delivery, like any answer.
+            if faults.dishonest_adjudication_rate > 0.0
+                && rng
+                    .adjudication(&claim.claim_id, "dishonest")
+                    .random_bool(faults.dishonest_adjudication_rate)
+            {
+                payer::apply_dishonesty(&mut remit, &rng);
+                record_fault(&sim_truth, &claim.claim_id, attempt, FaultKind::Dishonest).await;
+            }
 
             // Return hop: payer → biller. The payer DID adjudicate; a drop here
             // (fault 2.2) is indistinguishable from 2.1 to the biller — and the
@@ -135,6 +146,26 @@ impl Clearinghouse {
                     .random_range(0.0..faults.max_extra_delay_secs.max(f64::MIN_POSITIVE));
                 record_fault(&sim_truth, &claim.claim_id, attempt, FaultKind::ExtraDelay).await;
                 tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
+            }
+
+            // Fault 3.2: claim_id mangled in transit — the remittance will
+            // reach the biller but can never correlate; the real claim hears
+            // only silence.
+            if chance(
+                &rng,
+                &claim.claim_id,
+                attempt,
+                "return/corrupt_id",
+                faults.corrupt_claim_id_rate,
+            ) {
+                record_fault(
+                    &sim_truth,
+                    &claim.claim_id,
+                    attempt,
+                    FaultKind::CorruptClaimId,
+                )
+                .await;
+                remit.claim_id = ClaimId(format!("corrupt/{attempt}/{}", claim.claim_id));
             }
 
             // Send failure means the clearinghouse itself is gone — shutdown.
