@@ -6,6 +6,7 @@ mod common;
 use common::{run_sim_with, simple_claim, write_input};
 use healthcare_billing_sim::RunConfig;
 use healthcare_billing_sim::domain::PayerId;
+use healthcare_billing_sim::ledger::events::ClaimEvent;
 use healthcare_billing_sim::ledger::records::{ClaimState, FlagReason};
 use healthcare_billing_sim::sim::sim_truth::FaultKind;
 
@@ -123,4 +124,78 @@ fn full_denial_that_sums_is_resolved_not_flagged() {
             assert_eq!(adj.not_allowed, line.billed(), "books still exact");
         }
     }
+}
+
+/// 3.3: service lines missing from the remittance. What arrived is applied
+/// and balanced; the claim stays partially adjudicated and keeps aging until
+/// a retry's re-delivery (fresh transport fates per attempt) fills the gaps —
+/// or the budget runs out and the partial claim is flagged, partial books
+/// intact. Unknown lines were covered as Malformed in the reconcile tests.
+#[test]
+fn missing_lines_stay_partial_and_accumulate_across_retries() {
+    let input: Vec<String> = (0..30)
+        .map(|i| {
+            let payer = ["medicare", "united_health_group", "anthem"][i % 3];
+            common::claim_line(
+                &format!("c-{i:03}"),
+                payer,
+                serde_json::json!([
+                    common::service_line("L1", 1, 100.0, false),
+                    common::service_line("L2", 2, 55.5, false),
+                    common::service_line("L3", 1, 20.25, false)
+                ]),
+            )
+        })
+        .collect();
+    let path = write_input("line_drops.jsonl", &input);
+    let mut cfg = RunConfig::new(path, 42, 10.0);
+    cfg.faults.line_drop_rate = 0.25;
+
+    let output = run_sim_with(cfg);
+    assert!(output.sim_truth.count(FaultKind::LineDrop) > 0);
+
+    let mut accumulated = 0;
+    for record in output.ledger.claims.values() {
+        assert!(
+            record.state.is_terminal(),
+            "claim {} stuck",
+            record.claim_id
+        );
+        let applications = record
+            .history
+            .iter()
+            .filter(|e| matches!(e.event, ClaimEvent::RemittanceApplied { .. }))
+            .count();
+        if applications >= 2 {
+            accumulated += 1; // a partial was later completed by a re-delivery
+        }
+        match &record.state {
+            ClaimState::Resolved => {
+                for line in record.lines.iter().filter(|l| !l.do_not_bill) {
+                    let adj = line.adjudication.as_ref().expect("all lines answered");
+                    assert_eq!(
+                        line.billed(),
+                        adj.payer_paid + adj.patient_responsibility() + adj.not_allowed
+                    );
+                }
+            }
+            ClaimState::Flagged {
+                reason: FlagReason::RetriesExhausted,
+            } => {
+                // Partial books are retained, and every answered line balances.
+                for line in record.lines.iter().filter(|l| l.adjudication.is_some()) {
+                    let adj = line.adjudication.as_ref().expect("checked");
+                    assert_eq!(
+                        line.billed(),
+                        adj.payer_paid + adj.patient_responsibility() + adj.not_allowed
+                    );
+                }
+            }
+            state => panic!("unexpected state {state:?} for {}", record.claim_id),
+        }
+    }
+    assert!(
+        accumulated > 0,
+        "seed must exercise partial-then-complete accumulation"
+    );
 }

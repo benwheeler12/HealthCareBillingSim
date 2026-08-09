@@ -3,16 +3,23 @@
 //! `now`, and executes the returned actions. Fault-table unit tests target
 //! `next()`, not the runtime.
 
+use std::collections::BTreeMap;
+
 use crate::biller::policy::RetryPolicy;
 use crate::biller::reconcile::{self, ReconcileOutcome};
 use crate::domain::{Claim, RemittanceAdvice, VirtualTime};
 use crate::ledger::events::ClaimEvent;
-use crate::ledger::records::FlagReason;
+use crate::ledger::records::{Adjudication, FlagReason};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TaskState {
     Init,
-    Awaiting { attempt: u32 },
+    Awaiting {
+        attempt: u32,
+        /// Lines already adjudicated (fault 3.3: remittances may be partial).
+        /// Survives retries — a re-sent line is skipped idempotently.
+        answered: BTreeMap<String, Adjudication>,
+    },
     Done,
 }
 
@@ -41,12 +48,16 @@ pub fn next(
     now: VirtualTime,
 ) -> (TaskState, Vec<Action>) {
     match (state, event) {
-        (TaskState::Init, TaskEvent::Start) => submit(1, policy, now),
-        (TaskState::Awaiting { .. }, TaskEvent::Remittance(remit)) => {
-            settle(reconcile::reconcile(claim, &remit, now))
-        }
-        (TaskState::Awaiting { attempt }, TaskEvent::Timeout) if attempt < policy.max_attempts => {
-            submit(attempt + 1, policy, now)
+        (TaskState::Init, TaskEvent::Start) => submit(1, BTreeMap::new(), policy, now),
+        (TaskState::Awaiting { attempt, answered }, TaskEvent::Remittance(remit)) => settle(
+            reconcile::reconcile(claim, &answered, &remit, now),
+            attempt,
+            answered,
+        ),
+        (TaskState::Awaiting { attempt, answered }, TaskEvent::Timeout)
+            if attempt < policy.max_attempts =>
+        {
+            submit(attempt + 1, answered, policy, now)
         }
         (TaskState::Awaiting { .. }, TaskEvent::Timeout) => (
             TaskState::Done,
@@ -65,12 +76,17 @@ pub fn next(
     }
 }
 
-fn submit(attempt: u32, policy: &RetryPolicy, now: VirtualTime) -> (TaskState, Vec<Action>) {
+fn submit(
+    attempt: u32,
+    answered: BTreeMap<String, Adjudication>,
+    policy: &RetryPolicy,
+    now: VirtualTime,
+) -> (TaskState, Vec<Action>) {
     // The shell sleeps the backoff before sending; the recorded deadline
     // reflects that.
     let timeout_at = now + policy.backoff(attempt) + policy.timeout;
     (
-        TaskState::Awaiting { attempt },
+        TaskState::Awaiting { attempt, answered },
         vec![
             Action::Submit { attempt },
             Action::Emit(ClaimEvent::Submitted {
@@ -81,32 +97,57 @@ fn submit(attempt: u32, policy: &RetryPolicy, now: VirtualTime) -> (TaskState, V
     )
 }
 
-fn settle(outcome: ReconcileOutcome) -> (TaskState, Vec<Action>) {
-    let actions = match outcome {
-        ReconcileOutcome::Balanced { lines } => vec![
-            Action::Emit(ClaimEvent::RemittanceApplied { lines }),
-            Action::Emit(ClaimEvent::Resolved),
-            Action::Finish,
-        ],
+fn settle(
+    outcome: ReconcileOutcome,
+    attempt: u32,
+    mut answered: BTreeMap<String, Adjudication>,
+) -> (TaskState, Vec<Action>) {
+    let apply = |lines: &[(String, Adjudication)]| {
+        (!lines.is_empty()).then(|| {
+            Action::Emit(ClaimEvent::RemittanceApplied {
+                lines: lines.to_vec(),
+            })
+        })
+    };
+    match outcome {
+        ReconcileOutcome::Complete { new_lines } => {
+            let actions = apply(&new_lines)
+                .into_iter()
+                .chain([Action::Emit(ClaimEvent::Resolved), Action::Finish])
+                .collect();
+            (TaskState::Done, actions)
+        }
         ReconcileOutcome::Unbalanced {
-            lines,
+            new_lines,
             billed,
             accounted,
-        } => vec![
-            Action::Emit(ClaimEvent::RemittanceApplied { lines }),
-            Action::Emit(ClaimEvent::Flagged {
+        } => {
+            let flag = Action::Emit(ClaimEvent::Flagged {
                 reason: FlagReason::ReconciliationFailed { billed, accounted },
-            }),
-            Action::Finish,
-        ],
-        ReconcileOutcome::Malformed { .. } => vec![
-            Action::Emit(ClaimEvent::Flagged {
-                reason: FlagReason::MalformedRemittance,
-            }),
-            Action::Finish,
-        ],
-    };
-    (TaskState::Done, actions)
+            });
+            let actions = apply(&new_lines)
+                .into_iter()
+                .chain([flag, Action::Finish])
+                .collect();
+            (TaskState::Done, actions)
+        }
+        // Fault 3.3: balanced but incomplete — apply what came, keep the
+        // current attempt's deadline armed, keep aging.
+        ReconcileOutcome::Partial { new_lines } => {
+            let actions = apply(&new_lines).into_iter().collect();
+            answered.extend(new_lines);
+            (TaskState::Awaiting { attempt, answered }, actions)
+        }
+        ReconcileOutcome::Malformed { .. } => (
+            TaskState::Done,
+            vec![
+                Action::Emit(ClaimEvent::Flagged {
+                    reason: FlagReason::MalformedRemittance,
+                }),
+                Action::Finish,
+            ],
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -151,7 +192,7 @@ mod tests {
     fn happy_path_start_then_balanced_remit_resolves() {
         let (claim, policy, now) = (claim(), RetryPolicy::default(), VirtualTime::default());
         let (state, actions) = next(TaskState::Init, TaskEvent::Start, &claim, &policy, now);
-        assert_eq!(state, TaskState::Awaiting { attempt: 1 });
+        assert!(matches!(state, TaskState::Awaiting { attempt: 1, .. }));
         assert!(matches!(actions[0], Action::Submit { attempt: 1 }));
 
         let (state, actions) = next(
@@ -169,10 +210,16 @@ mod tests {
     #[test]
     fn timeout_retries_until_attempts_exhausted_then_flags() {
         let (claim, policy, now) = (claim(), RetryPolicy::default(), VirtualTime::default());
-        let mut state = TaskState::Awaiting { attempt: 1 };
+        let mut state = TaskState::Awaiting {
+            attempt: 1,
+            answered: BTreeMap::new(),
+        };
         for expected in 2..=policy.max_attempts {
             let (next_state, actions) = next(state, TaskEvent::Timeout, &claim, &policy, now);
-            assert_eq!(next_state, TaskState::Awaiting { attempt: expected });
+            assert!(matches!(
+                next_state,
+                TaskState::Awaiting { attempt, .. } if attempt == expected
+            ));
             assert!(matches!(actions[0], Action::Submit { attempt } if attempt == expected));
             state = next_state;
         }
@@ -192,7 +239,10 @@ mod tests {
         let mut remit = balanced_remit();
         remit.lines[0].payer_paid = Money::from_cents(700); // short by $1
         let (state, actions) = next(
-            TaskState::Awaiting { attempt: 1 },
+            TaskState::Awaiting {
+                attempt: 1,
+                answered: BTreeMap::new(),
+            },
             TaskEvent::Remittance(remit),
             &claim,
             &policy,

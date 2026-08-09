@@ -19,6 +19,9 @@ pub struct FaultProfile {
     pub duplicate_rate: f64,
     /// Fault 3.1: probability a payer lies (amounts don't sum).
     pub dishonest_adjudication_rate: f64,
+    /// Fault 3.3: per-line probability that a service line vanishes from the
+    /// remittance in transit, leaving the claim partially adjudicated.
+    pub line_drop_rate: f64,
     /// Fault 3.2: probability a remittance's claim_id is mangled in transit.
     pub corrupt_claim_id_rate: f64,
 }

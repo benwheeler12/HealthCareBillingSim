@@ -148,6 +148,23 @@ impl Clearinghouse {
                 tokio::time::sleep(std::time::Duration::from_secs_f64(secs)).await;
             }
 
+            // Fault 3.3: individual service lines vanish in transit. The
+            // remittance still arrives, balanced as far as it goes — the
+            // claim stays partially adjudicated and keeps aging.
+            if faults.line_drop_rate > 0.0 {
+                let mut dropped = 0;
+                let claim_id = &claim.claim_id;
+                remit.lines.retain(|line| {
+                    let point = format!("return/line_drop/{}", line.service_line_id);
+                    let keep = !chance(&rng, claim_id, attempt, &point, faults.line_drop_rate);
+                    dropped += usize::from(!keep);
+                    keep
+                });
+                for _ in 0..dropped {
+                    record_fault(&sim_truth, claim_id, attempt, FaultKind::LineDrop).await;
+                }
+            }
+
             // Fault 3.2: claim_id mangled in transit — the remittance will
             // reach the biller but can never correlate; the real claim hears
             // only silence.
