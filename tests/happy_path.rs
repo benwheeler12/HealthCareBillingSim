@@ -3,48 +3,15 @@
 //! terminal state, none lost, stuck, or double-counted — plus the
 //! reconciliation equation and outcome-determinism.
 
+mod common;
+
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::PathBuf;
 
+use common::{claim_line, service_line, write_input};
 use healthcare_billing_sim::domain::Money;
 use healthcare_billing_sim::ledger::records::{ClaimState, Ledger};
-use healthcare_billing_sim::{RunConfig, run};
 use serde_json::json;
-
-fn claim_line(claim_id: &str, payer: &str, lines: serde_json::Value) -> String {
-    json!({
-        "claim_id": claim_id,
-        "place_of_service_code": 11,
-        "insurance": {"payer_id": payer, "patient_member_id": format!("M-{claim_id}")},
-        "patient": {"first_name": "Ada", "last_name": "Lovelace", "gender": "f", "dob": "1985-12-10"},
-        "organization": {"name": "Analytical Engines LLC"},
-        "rendering_provider": {"first_name": "Grace", "last_name": "Hopper", "npi": "1234567890"},
-        "service_lines": lines,
-    })
-    .to_string()
-}
-
-fn service_line(id: &str, units: u32, dollars: f64, do_not_bill: bool) -> serde_json::Value {
-    json!({
-        "service_line_id": id,
-        "procedure_code": "99213",
-        "units": units,
-        "details": "office visit",
-        "unit_charge_currency": "USD",
-        "unit_charge_amount": dollars,
-        "do_not_bill": do_not_bill,
-    })
-}
-
-fn write_input(name: &str, lines: &[String]) -> PathBuf {
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    let mut file = std::fs::File::create(&path).expect("create input");
-    for line in lines {
-        writeln!(file, "{line}").expect("write input");
-    }
-    path
-}
 
 fn happy_input() -> Vec<String> {
     vec![
@@ -88,14 +55,7 @@ fn happy_input() -> Vec<String> {
 }
 
 fn run_sim(path: PathBuf, seed: u64) -> Ledger {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .start_paused(true)
-        .build()
-        .expect("runtime");
-    runtime
-        .block_on(run(RunConfig::new(path, seed, 1.0)))
-        .expect("run")
+    common::run_sim(path, seed)
 }
 
 /// Comparable fingerprint of every claim's outcome: terminal state plus the

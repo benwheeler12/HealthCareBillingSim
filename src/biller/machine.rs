@@ -66,7 +66,9 @@ pub fn next(
 }
 
 fn submit(attempt: u32, policy: &RetryPolicy, now: VirtualTime) -> (TaskState, Vec<Action>) {
-    let timeout_at = now + policy.timeout;
+    // The shell sleeps the backoff before sending; the recorded deadline
+    // reflects that.
+    let timeout_at = now + policy.backoff(attempt) + policy.timeout;
     (
         TaskState::Awaiting { attempt },
         vec![

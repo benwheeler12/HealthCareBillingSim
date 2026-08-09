@@ -73,6 +73,8 @@ async fn drive(
     for action in actions {
         match action {
             Action::Submit { attempt } => {
+                // Backoff before a retry (fault 2.1); virtual time, so free.
+                tokio::time::sleep(deps.policy.backoff(attempt)).await;
                 *deadline = Instant::now() + deps.policy.timeout;
                 let submission = claim.to_submission(attempt);
                 deps.clearinghouse_tx
