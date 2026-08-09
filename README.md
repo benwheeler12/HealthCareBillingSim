@@ -14,12 +14,17 @@ spec, the test matrix, and (deliberately) the git history.
 ## Quickstart
 
 ```sh
-# The showcase: 5,000 claims (checked in, ~2% deliberately malformed),
-# every fault class on, submissions spread across ~4 virtual months:
+# The default run already has weather in it — real clearinghouses lose
+# things, so drops, duplicates, and delays are on out of the box (preset
+# 'messy'), and the 5k sample includes ~2% deliberately malformed lines:
+cargo run -- data/sample_claims_5k.jsonl
+
+# The showcase: every fault class at once, a slow denial-happy anthem,
+# submissions spread across ~4 virtual months so every report fills:
 cargo run -- data/sample_claims_5k.jsonl --preset chaos --rate 0.0005
 
-# Honest run over the small handcrafted sample:
-cargo run -- data/sample_claims.jsonl
+# Lossless baseline, if you want a true happy path:
+cargo run -- data/sample_claims.jsonl --preset honest
 
 # Roll your own input at any size:
 cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out claims.jsonl
@@ -40,8 +45,10 @@ payer personalities, and where each value came from.
 Configuration layers, later wins: **defaults → `--preset` →
 `--fault-profile` file → individual flags.**
 
-- `--preset honest|messy|chaos` — one-flag demos, from lossless transport to
-  everything-at-once with a slow, denial-happy anthem.
+- `--preset honest|messy|chaos` — **defaults to `messy`** (drops, duplicates,
+  delays: the assessment's "bake in a little unreliability"). `honest` is the
+  lossless baseline; `chaos` is everything at once with a slow, denial-happy
+  anthem.
 - `--fault-profile FILE` — scenario JSON for precise control
   (`data/demo_scenario.json` is a template; unknown fields are rejected).
 - Individual knobs: `--forward-drop-rate`, `--return-drop-rate`,
