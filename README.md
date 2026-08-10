@@ -47,13 +47,16 @@ On a real terminal, runs open an **interactive UI**: the reports are panes on
 a static screen, opening on the Timeline — ←/→ to move between Timeline,
 Overview, Aging (payer A/R and patient responsibility as two sections),
 Scorecard, Denials, Provider Insights, and Diagnostic; ↑/↓ scrolls (or
-selects rows in the receivables table). The **Provider Insights pane** lists
-every outstanding receivable — claim, payer, provider (one of 100 billing
-organizations), outstanding, age, and a risk score (dollars × days stuck) —
-sortable by **c**ost, **a**ge, or **r**isk, either direction (press the key
-again to flip); **Enter on a row opens that claim's full audit trail** —
-every event with virtual timestamps, straight from the event-sourced
-ledger. The **Timeline pane charts the run**: a 2×2 grid of
+selects rows in the focused list). The **Provider Insights pane** is a
+master–detail view: scroll a list of billing organizations (100 in the
+sample, sorted by total outstanding) and the panel beside it live-updates
+with that provider's open claims — outstanding, age, and a risk score
+(dollars × days stuck), sortable by **c**ost, **a**ge, or **r**isk in
+either direction (press the key again to flip). Tab (or Enter on a
+provider) moves focus into the claims list; **Enter on a claim opens its
+full audit trail** — every event with virtual timestamps, straight from
+the event-sourced ledger. Each pane carries its own instructions at the
+top; the status box at the bottom never changes its text. The **Timeline pane charts the run**: a 2×2 grid of
 small multiples — per-virtual-day rates for ingested, submitted, remitted,
 and settled on one shared scale, so submitted riding above ingested reads
 as retry traffic (the fault injection made visible) — over a chart of the

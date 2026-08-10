@@ -85,11 +85,11 @@ struct App {
 struct Done {
     output: RunOutput,
     panes: Vec<Pane>,
+    /// Every open receivable, unordered; the insights view holds sorted
+    /// index lists into this.
     chase: Vec<ChaseItem>,
-    table: TableState,
     timeline: Timeline,
-    sort: SortKey,
-    sort_desc: bool,
+    insights: Insights,
     /// Open claim-detail overlay, if any.
     detail: Option<String>,
 }
@@ -99,7 +99,35 @@ struct Pane {
     content: String,
 }
 
-/// Sort order for the provider-insights receivables table.
+/// Master–detail state for the Provider Insights pane: a provider list on
+/// the left drives a claims table on the right; Tab (or Enter on a
+/// provider) moves focus right, Tab toggles back.
+struct Insights {
+    /// Aggregated per organization, sorted by total outstanding desc.
+    providers: Vec<ProviderRow>,
+    provider_table: TableState,
+    /// The selected provider's open claims: indices into `Done::chase`,
+    /// ordered by the active sort.
+    claims: Vec<usize>,
+    claims_table: TableState,
+    focus: InsightsFocus,
+    sort: SortKey,
+    sort_desc: bool,
+}
+
+struct ProviderRow {
+    name: String,
+    open: usize,
+    outstanding: Money,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InsightsFocus {
+    Providers,
+    Claims,
+}
+
+/// Sort order for the selected provider's claims table.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortKey {
     Cost,
@@ -119,6 +147,11 @@ impl SortKey {
 
 const TIMELINE_PANE: usize = 0;
 const INSIGHTS_PANE: usize = 5;
+
+/// One keys line, everywhere, always — the status box never rewords itself.
+/// Pane-specific instructions live at the top of the pane they belong to.
+const KEYS_HINT: &str =
+    "←/→ panes · ↑/↓ scroll or select · enter drill in · q quit (prints plain report)";
 
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
@@ -196,20 +229,37 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             app.pane = (app.pane + 1) % panes;
             app.scroll = 0;
         }
-        KeyCode::Up if app.pane == INSIGHTS_PANE => move_selection(done, -1),
-        KeyCode::Down if app.pane == INSIGHTS_PANE => move_selection(done, 1),
-        KeyCode::PageUp if app.pane == INSIGHTS_PANE => move_selection(done, -10),
-        KeyCode::PageDown if app.pane == INSIGHTS_PANE => move_selection(done, 10),
+        KeyCode::Up if app.pane == INSIGHTS_PANE => done.move_selection(-1),
+        KeyCode::Down if app.pane == INSIGHTS_PANE => done.move_selection(1),
+        KeyCode::PageUp if app.pane == INSIGHTS_PANE => done.move_selection(-10),
+        KeyCode::PageDown if app.pane == INSIGHTS_PANE => done.move_selection(10),
         KeyCode::Up => app.scroll = app.scroll.saturating_sub(1),
         KeyCode::Down => app.scroll = app.scroll.saturating_add(1),
         KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(10),
         KeyCode::PageDown => app.scroll = app.scroll.saturating_add(10),
-        KeyCode::Enter if app.pane == INSIGHTS_PANE => {
-            if let Some(item) = done.table.selected().and_then(|i| done.chase.get(i)) {
-                done.detail = Some(claim_detail(&done.output, &item.claim_id.0));
-            }
+        KeyCode::Tab if app.pane == INSIGHTS_PANE => {
+            done.insights.focus = match done.insights.focus {
+                InsightsFocus::Providers => InsightsFocus::Claims,
+                InsightsFocus::Claims => InsightsFocus::Providers,
+            };
         }
-        // Sort keys on the insights table: pressing the active key flips the
+        KeyCode::Enter if app.pane == INSIGHTS_PANE => match done.insights.focus {
+            // Enter on a provider steps into their claims.
+            InsightsFocus::Providers => done.insights.focus = InsightsFocus::Claims,
+            // Enter on a claim opens the full breakdown.
+            InsightsFocus::Claims => {
+                let selected = done
+                    .insights
+                    .claims_table
+                    .selected()
+                    .and_then(|i| done.insights.claims.get(i))
+                    .and_then(|&idx| done.chase.get(idx));
+                if let Some(item) = selected {
+                    done.detail = Some(claim_detail(&done.output, &item.claim_id.0));
+                }
+            }
+        },
+        // Sort keys for the claims table: pressing the active key flips the
         // direction, pressing another switches to it (descending first).
         KeyCode::Char('c') if app.pane == INSIGHTS_PANE => done.set_sort(SortKey::Cost),
         KeyCode::Char('a') if app.pane == INSIGHTS_PANE => done.set_sort(SortKey::Age),
@@ -217,15 +267,6 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         _ => {}
     }
     false
-}
-
-fn move_selection(done: &mut Done, delta: isize) {
-    if done.chase.is_empty() {
-        return;
-    }
-    let current = done.table.selected().unwrap_or(0) as isize;
-    let next = (current + delta).clamp(0, done.chase.len() as isize - 1);
-    done.table.select(Some(next as usize));
 }
 
 fn final_progress(output: &RunOutput) -> Progress {
@@ -262,11 +303,7 @@ impl Done {
             ar_aging(books, as_of),
             days_in_ar(books, as_of)
         );
-        let chase = chase_list(books, as_of, 500);
-        let mut table = TableState::default();
-        if !chase.is_empty() {
-            table.select(Some(0));
-        }
+        let chase = chase_list(books, as_of, usize::MAX);
         let timeline = timeline(
             &output.ledger.event_log,
             output.intake_finished_at,
@@ -304,35 +341,125 @@ impl Done {
                 content: diagnostic(&output.ledger, &output.sim_truth).to_string(),
             },
         ];
-        let mut done = Done {
+        let insights = Insights::build(&chase);
+        Done {
             output,
             panes,
             chase,
-            table,
             timeline,
-            sort: SortKey::Risk,
-            sort_desc: true,
+            insights,
             detail: None,
-        };
-        done.resort();
-        done
+        }
+    }
+
+    /// Move the selection in whichever insights list has focus; moving the
+    /// provider selection re-derives that provider's claims.
+    fn move_selection(&mut self, delta: isize) {
+        let ins = &mut self.insights;
+        match ins.focus {
+            InsightsFocus::Providers => {
+                if step(&mut ins.provider_table, ins.providers.len(), delta) {
+                    ins.rebuild_claims(&self.chase);
+                }
+            }
+            InsightsFocus::Claims => {
+                step(&mut ins.claims_table, ins.claims.len(), delta);
+            }
+        }
     }
 
     /// Toggle direction when the active key is pressed again; switch keys
     /// descending-first otherwise.
     fn set_sort(&mut self, key: SortKey) {
-        if self.sort == key {
-            self.sort_desc = !self.sort_desc;
+        let ins = &mut self.insights;
+        if ins.sort == key {
+            ins.sort_desc = !ins.sort_desc;
         } else {
-            self.sort = key;
-            self.sort_desc = true;
+            ins.sort = key;
+            ins.sort_desc = true;
         }
-        self.resort();
+        ins.rebuild_claims(&self.chase);
+    }
+}
+
+/// Advance a table selection by `delta`, clamped; returns true if it moved.
+fn step(table: &mut TableState, len: usize, delta: isize) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let current = table.selected().unwrap_or(0) as isize;
+    let next = (current + delta).clamp(0, len as isize - 1) as usize;
+    let moved = table.selected() != Some(next);
+    table.select(Some(next));
+    moved
+}
+
+impl Insights {
+    fn build(chase: &[ChaseItem]) -> Insights {
+        // Aggregate per organization: open-claim count and total outstanding.
+        let mut totals: std::collections::HashMap<&str, (usize, Money)> =
+            std::collections::HashMap::new();
+        for item in chase {
+            let entry = totals
+                .entry(item.provider.as_str())
+                .or_insert((0, Money::ZERO));
+            entry.0 += 1;
+            entry.1 += item.outstanding;
+        }
+        let mut providers: Vec<ProviderRow> = totals
+            .into_iter()
+            .map(|(name, (open, outstanding))| ProviderRow {
+                name: name.to_string(),
+                open,
+                outstanding,
+            })
+            .collect();
+        providers.sort_by(|a, b| {
+            b.outstanding
+                .cmp(&a.outstanding)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        let mut provider_table = TableState::default();
+        if !providers.is_empty() {
+            provider_table.select(Some(0));
+        }
+        let mut insights = Insights {
+            providers,
+            provider_table,
+            claims: Vec::new(),
+            claims_table: TableState::default(),
+            focus: InsightsFocus::Providers,
+            sort: SortKey::Risk,
+            sort_desc: true,
+        };
+        insights.rebuild_claims(chase);
+        insights
     }
 
-    fn resort(&mut self) {
+    fn selected_provider(&self) -> Option<&ProviderRow> {
+        self.provider_table
+            .selected()
+            .and_then(|i| self.providers.get(i))
+    }
+
+    /// Re-derive the claims list for the selected provider under the active
+    /// sort, and reset the claim selection to the top.
+    fn rebuild_claims(&mut self, chase: &[ChaseItem]) {
+        let Some(provider) = self.selected_provider().map(|p| p.name.clone()) else {
+            self.claims.clear();
+            self.claims_table.select(None);
+            return;
+        };
+        self.claims = chase
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.provider == provider)
+            .map(|(idx, _)| idx)
+            .collect();
         let key = self.sort;
-        self.chase.sort_by(|a, b| {
+        self.claims.sort_by(|&a, &b| {
+            let (a, b) = (&chase[a], &chase[b]);
             let ordering = match key {
                 SortKey::Cost => a.outstanding.cmp(&b.outstanding),
                 SortKey::Age => a.age.cmp(&b.age),
@@ -345,11 +472,10 @@ impl Done {
             ordering.then_with(|| a.claim_id.cmp(&b.claim_id))
         });
         if self.sort_desc {
-            self.chase.reverse();
+            self.claims.reverse();
         }
-        if !self.chase.is_empty() {
-            self.table.select(Some(0));
-        }
+        self.claims_table
+            .select((!self.claims.is_empty()).then_some(0));
     }
 }
 
@@ -625,9 +751,78 @@ fn fmt_axis(v: f64) -> String {
 }
 
 fn draw_insights(frame: &mut ratatui::Frame, area: Rect, done: &mut Done) {
-    let arrow = if done.sort_desc { "↓" } else { "↑" };
+    let [hint_area, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(area);
+    frame.render_widget(
+        Line::from(
+            " ↑/↓ select provider · tab or enter → their claims (tab back) · \
+             c/a/r sort claims by cost/age/risk, press again to flip · \
+             enter on a claim: full breakdown ",
+        )
+        .style(Style::default().fg(Color::DarkGray)),
+        hint_area,
+    );
+
+    let ins = &mut done.insights;
+    if ins.providers.is_empty() {
+        frame.render_widget(
+            Paragraph::new("nothing outstanding — all receivables booked")
+                .block(Block::bordered().title(" Provider insights ")),
+            body,
+        );
+        return;
+    }
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(40), Constraint::Min(40)]).areas(body);
+
+    let focus_style = Style::default().fg(Color::Cyan);
+    let blur_style = Style::default().fg(Color::DarkGray);
+    let highlight = Style::default()
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+
+    // Left: the providers, biggest book of open money first.
+    let provider_rows: Vec<Row> = ins
+        .providers
+        .iter()
+        .map(|p| {
+            Row::new([
+                p.name.clone(),
+                p.open.to_string(),
+                p.outstanding.to_string(),
+            ])
+        })
+        .collect();
+    let provider_focused = ins.focus == InsightsFocus::Providers;
+    let providers = Table::new(
+        provider_rows,
+        [
+            Constraint::Min(20),
+            Constraint::Length(4),
+            Constraint::Length(11),
+        ],
+    )
+    .header(Row::new(["provider", "open", "outstanding"]).style(Modifier::BOLD))
+    .block(
+        Block::bordered()
+            .title(format!(
+                " Providers — {} with open A/R ",
+                ins.providers.len()
+            ))
+            .border_style(if provider_focused {
+                focus_style
+            } else {
+                blur_style
+            }),
+    )
+    .row_highlight_style(highlight)
+    .highlight_symbol(if provider_focused { "▶ " } else { "  " });
+    frame.render_stateful_widget(providers, left, &mut ins.provider_table);
+
+    // Right: the selected provider's open claims under the active sort.
+    let arrow = if ins.sort_desc { "↓" } else { "↑" };
     let sort_header = |name: &str, key: SortKey| {
-        if done.sort == key {
+        if ins.sort == key {
             format!("{name} {arrow}")
         } else {
             name.to_string()
@@ -636,7 +831,6 @@ fn draw_insights(frame: &mut ratatui::Frame, area: Rect, done: &mut Done) {
     let header = Row::new([
         "claim".to_string(),
         "payer".to_string(),
-        "provider".to_string(),
         sort_header("outstanding", SortKey::Cost),
         sort_header("age", SortKey::Age),
         sort_header("risk", SortKey::Risk),
@@ -644,14 +838,14 @@ fn draw_insights(frame: &mut ratatui::Frame, area: Rect, done: &mut Done) {
         "status".to_string(),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
-    let rows: Vec<Row> = done
-        .chase
+    let claim_rows: Vec<Row> = ins
+        .claims
         .iter()
+        .filter_map(|&idx| done.chase.get(idx))
         .map(|item| {
             Row::new([
                 item.claim_id.0.clone(),
                 item.payer_id.as_str().to_string(),
-                item.provider.clone(),
                 item.outstanding.to_string(),
                 format!("{:.1}d", item.age.as_secs_f64() / 86_400.0),
                 format!("{:.0}", item.risk()),
@@ -663,28 +857,38 @@ fn draw_insights(frame: &mut ratatui::Frame, area: Rect, done: &mut Done) {
     let widths = [
         Constraint::Length(12),
         Constraint::Length(22),
-        Constraint::Length(26),
         Constraint::Length(12),
         Constraint::Length(8),
         Constraint::Length(9),
         Constraint::Length(4),
-        Constraint::Min(16),
+        Constraint::Min(14),
     ];
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::bordered().title(format!(
-            " Provider insights — {} outstanding receivables · sorted by {} {} (risk = $ × days) ",
-            done.chase.len(),
-            done.sort.label(),
+    let title = match ins.selected_provider() {
+        Some(p) => format!(
+            " {} — {} open · {} outstanding · sorted by {} {} (risk = $ × days) ",
+            p.name,
+            p.open,
+            p.outstanding,
+            ins.sort.label(),
             arrow,
-        )))
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+        ),
+        None => " claims ".to_string(),
+    };
+    let claims_focused = ins.focus == InsightsFocus::Claims;
+    let claims = Table::new(claim_rows, widths)
+        .header(header)
+        .block(
+            Block::bordered()
+                .title(title)
+                .border_style(if claims_focused {
+                    focus_style
+                } else {
+                    blur_style
+                }),
         )
-        .highlight_symbol("▶ ");
-    frame.render_stateful_widget(table, area, &mut done.table);
+        .row_highlight_style(highlight)
+        .highlight_symbol(if claims_focused { "▶ " } else { "  " });
+    frame.render_stateful_widget(claims, right, &mut ins.claims_table);
 }
 
 fn draw_detail(frame: &mut ratatui::Frame, area: Rect, detail: &str) {
@@ -716,31 +920,22 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         p.flagged,
         human_virtual(p.now.as_duration().as_secs_f64()),
     );
-    let (headline, keys) = match app.wall_done {
-        None => (
-            format!(
-                "{} running · {counts} · {:.1}s wall",
-                FRAMES[app.frame % FRAMES.len()],
-                app.wall_start.elapsed().as_secs_f64()
-            ),
-            "q quit".to_string(),
+    // The headline carries live state; the keys line is deliberately the
+    // same on every pane and in every phase — pane-specific instructions
+    // live at the top of the pane they belong to.
+    let headline = match app.wall_done {
+        None => format!(
+            "{} running · {counts} · {:.1}s wall",
+            FRAMES[app.frame % FRAMES.len()],
+            app.wall_start.elapsed().as_secs_f64()
         ),
-        Some(wall) => (
-            format!(
-                "✓ complete · {counts} · {:.2}s wall · seed {}",
-                wall.as_secs_f64(),
-                app.seed
-            ),
-            if app.pane == INSIGHTS_PANE {
-                "←/→ panes · ↑/↓ select · enter claim detail · c/a/r sort by cost/age/risk (again to flip) · q quit"
-                    .to_string()
-            } else {
-                "←/→ panes · ↑/↓ scroll or select · enter claim detail · q quit (prints plain report)"
-                    .to_string()
-            },
+        Some(wall) => format!(
+            "✓ complete · {counts} · {:.2}s wall · seed {}",
+            wall.as_secs_f64(),
+            app.seed
         ),
     };
-    let status = Paragraph::new(format!("{headline}\n{keys}"))
+    let status = Paragraph::new(format!("{headline}\n{KEYS_HINT}"))
         .block(Block::bordered().title(" simulation "));
     frame.render_widget(status, area);
 }
