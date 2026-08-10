@@ -16,18 +16,24 @@ spec, the test matrix, and (deliberately) the git history.
 ```sh
 # The default run already has weather in it — drops, duplicates, delays,
 # and per-payer route personalities (preset 'messy'), payers answering in
-# days-to-weeks, and the 5k sample spread across ~4.5 virtual months, so
+# days-to-weeks, and the 10k sample spread across ~9.5 virtual months, so
 # the AR aging report fills every bucket with a distinct profile per payer:
-cargo run -- data/sample_claims_5k.jsonl
+cargo run -- data/sample_claims_10k.jsonl
 
 # The showcase: every fault class at once plus a denial-happy anthem:
-cargo run -- data/sample_claims_5k.jsonl --preset chaos
+cargo run -- data/sample_claims_10k.jsonl --preset chaos
 
 # Lossless baseline, if you want a true happy path:
 cargo run -- data/sample_claims.jsonl --preset honest
 
 # Roll your own input at any size:
 cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out claims.jsonl
+
+# Scale test — mint the exact 1M-record input the numbers in BENCHMARKS.MD
+# were measured on (~10s to generate), then run it. Expect roughly a minute
+# of wall time and ~10 GiB peak memory on a 4-core machine:
+cargo run --release --bin generate-claims -- 1000000 --seed 7 --malformed-rate 0.02 --out claims_1m.jsonl
+cargo run --release -- claims_1m.jsonl
 
 # Tests (56) and lints:
 cargo test
@@ -74,7 +80,7 @@ Configuration layers, later wins: **defaults → `--preset` →
   `--garbage-rate`, `--max-attempts`, `--timeout-secs`, `--backoff-secs`.
 - `--seed` reproduces outcomes exactly; `--rate` is claims per *virtual*
   second — the default (0.0004, one claim every ~42 virtual minutes) spreads
-  the 5k sample across ~4.5 virtual months so receivables genuinely age;
+  the 10k sample across ~9.5 virtual months so receivables genuinely age;
   `--chase` sizes the chase list.
 - Scenario files and presets can set **per-payer fault profiles** (a payer
   entry's `faults` section) — different clearinghouse routes fail

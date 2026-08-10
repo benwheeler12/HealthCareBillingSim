@@ -36,7 +36,7 @@ struct Cli {
     seed: u64,
 
     /// Ingest rate, claims per VIRTUAL second (wall time is always fast).
-    /// The default spreads the 5k sample across ~4.5 virtual months so
+    /// The default spreads the 10k sample across ~9.5 virtual months so
     /// receivables genuinely age; raise it to compress the timeline.
     #[arg(long, default_value_t = 0.0004, help_heading = "Simulation")]
     rate: f64,
