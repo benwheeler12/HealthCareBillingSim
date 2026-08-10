@@ -23,12 +23,27 @@ pub struct Summary {
 }
 
 pub fn summarize(ledger: &Ledger) -> Summary {
-    let mut s = Summary {
-        total_claims: ledger.claims.len(),
-        ..Summary::default()
-    };
-    s.quarantined_remittances = ledger.quarantine.len();
+    summarize_for(ledger, None)
+}
+
+/// The same summary, restricted to one billing organization when `provider`
+/// is given. Rejected-at-parse rows carry no identity, so they (and the
+/// quarantine count) only appear in the whole-portfolio view.
+pub fn summarize_for(ledger: &Ledger, provider: Option<&str>) -> Summary {
+    let mut s = Summary::default();
+    if provider.is_none() {
+        s.quarantined_remittances = ledger.quarantine.len();
+    }
     for record in ledger.claims.values() {
+        if provider.is_some_and(|p| {
+            record
+                .identity
+                .as_ref()
+                .is_none_or(|id| id.organization_name != p)
+        }) {
+            continue;
+        }
+        s.total_claims += 1;
         match &record.state {
             ClaimState::Resolved => s.resolved += 1,
             ClaimState::Rejected { .. } => s.rejected += 1,

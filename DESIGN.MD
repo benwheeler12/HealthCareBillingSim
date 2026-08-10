@@ -399,26 +399,29 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     lines, and corruption produces garbage (silence), never plausible-but-
     wrong line ids. It exists as biller self-defense and is unit-tested only.
 
-26. **TUI audit: five panes, one visual language.** The seven-pane layout
-    had two weak screens (Overview and Diagnostic were thin text dumps) and
-    two near-duplicates (Scorecard and Denials cover the same remittance
-    data). Collapsed to five, ordered money-first: A/R Aging · Payer
-    Scorecard · Provider Insights · Simulation Overview · Simulation
-    Timeline (the run opens on A/R Aging). The merged Overview is the run
-    on one page — a breakdown of the executed configuration values on the
-    left (seed, ingest rate shown per virtual minute, retry policy, every
-    enabled fault rate — values, not provenance), outcomes right (claims
-    funnel + money waterfall as proportional bars), and the old diagnostic
-    reborn as a cause→effect table: each injected fault kind (ground
-    truth) beside the symptom it left on the books, which is the
-    input→output link made explicit. The merged Payer Scorecard is a
-    league table graded on the curve (A–F over denial rate / response time
-    / paid share) whose selection drives two stat tables — Configured and
+26. **TUI audit: four panes, one visual language, every report pane
+    scrollable by provider.** The seven-pane layout had two weak screens
+    (Overview and Diagnostic were thin text dumps) and two near-duplicates
+    (Scorecard and Denials cover the same remittance data). Converged on
+    four, ordered money-first: A/R Aging · Payer Scorecard · Provider
+    Insights · Timeline (the run opens on A/R Aging). A/R Aging is a
+    master–detail view: a provider list (whole portfolio first) drives the
+    report on the right — the outcome bars (claims funnel + money
+    waterfall as proportional bars, computed over the drained final books)
+    above the colored aging tables, re-derived per billing organization
+    via `ar_aging_for`/`days_in_ar_for`/`summarize_for` filtered variants
+    of the pure report functions. The merged Payer Scorecard is a league
+    table graded on the curve (A–F over denial rate / response time / paid
+    share) whose selection drives two stat tables — Configured and
     Observed, the closed-loop demo on one screen — plus that payer's
-    denial reasons. A/R Aging is itself a master–detail view: a provider
-    list (whole portfolio first) re-derives the colored aging tables per
-    billing organization, via `ar_aging_for`/`days_in_ar_for` filtered
-    variants of the pure report functions.
+    denial reasons. The Timeline uses the same provider-list pattern: the
+    rate small-multiples and backlog chart re-bucket from the retained
+    event log for the selected organization, on the portfolio's shared
+    x-axis so shapes stay comparable. A standalone Simulation Overview
+    pane was tried and cut — its outcomes moved into every A/R Aging book,
+    its config breakdown already opens every run (banner + stdout), and
+    the cause→effect fault table lives on in the plain report's sim-truth
+    diagnostic, which remains the only god's-eye surface.
     `tui.rs` split into a module tree (`tui/{theme,timeline,overview,
     payers,aging,insights}`) with a shared theme — one accent, one hint
     style, one bar vocabulary (largest-remainder segment bars, unit-tested)

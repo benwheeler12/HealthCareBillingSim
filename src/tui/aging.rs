@@ -1,8 +1,10 @@
 //! The A/R Aging pane: a master–detail view. A provider list on the left
 //! (whole portfolio first, then each billing organization by open payer A/R)
-//! drives the aging tables on the right — the same colored buckets and mix
-//! bars, recomputed for whichever book is selected. Tab hops focus so ↑/↓
-//! can either change the selection or scroll the tables.
+//! drives the report on the right — the outcome bars (claims funnel + money
+//! waterfall, from the drained final books) above the aging tables with
+//! their colored buckets and mix bars, all recomputed for whichever book is
+//! selected. Tab hops focus so ↑/↓ can either change the selection or
+//! scroll the report.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -12,12 +14,14 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
-use healthcare_billing_sim::domain::{Money, PayerId, VirtualTime};
-use healthcare_billing_sim::ledger::records::Ledger;
+use healthcare_billing_sim::RunOutput;
+use healthcare_billing_sim::domain::{Money, PayerId};
 use healthcare_billing_sim::reports::aging::AgingBuckets;
-use healthcare_billing_sim::reports::{ar_aging_for, days_in_ar_for};
+use healthcare_billing_sim::reports::{ar_aging_for, days_in_ar_for, summarize_for};
 
-use super::theme::{self, ACCENT, ALERT, BAD, GOOD, WARN, bold, dim, money};
+use super::theme::{
+    self, ACCENT, ALERT, BAD, GOOD, WARN, bold, dim, money, pct, swatch, thousands,
+};
 
 /// Young → old, the same hues the legend and mix bars use.
 const BUCKET_COLORS: [Color; 4] = [GOOD, WARN, ALERT, BAD];
@@ -49,7 +53,8 @@ enum Focus {
     Tables,
 }
 
-pub fn build(books: &Ledger, as_of: VirtualTime) -> AgingView {
+pub fn build(output: &RunOutput) -> AgingView {
+    let books = &output.intake_ledger;
     // Aggregate per organization: open payer-A/R claims and dollars. An
     // organization appears if it has anything on either book.
     let mut totals: HashMap<&str, (usize, Money)> = HashMap::new();
@@ -102,7 +107,7 @@ pub fn build(books: &Ledger, as_of: VirtualTime) -> AgingView {
 
     let mut table = TableState::default();
     table.select(Some(0));
-    let doc = build_doc(books, as_of, None);
+    let doc = build_doc(output, None);
     AgingView {
         providers,
         table,
@@ -114,13 +119,13 @@ pub fn build(books: &Ledger, as_of: VirtualTime) -> AgingView {
 
 impl AgingView {
     /// ↑/↓: move whichever side has focus — the provider selection (which
-    /// rebuilds the tables) or the table scroll.
-    pub fn key_move(&mut self, delta: isize, books: &Ledger, as_of: VirtualTime) {
+    /// rebuilds the report) or the report scroll.
+    pub fn key_move(&mut self, delta: isize, output: &RunOutput) {
         match self.focus {
             Focus::Providers => {
                 if super::step(&mut self.table, self.providers.len(), delta) {
                     let provider = self.selected_name().map(str::to_string);
-                    self.doc = build_doc(books, as_of, provider.as_deref());
+                    self.doc = build_doc(output, provider.as_deref());
                     self.scroll = 0;
                 }
             }
@@ -145,22 +150,24 @@ impl AgingView {
     }
 }
 
-/// The aging tables for one selection: headline, legend, payer A/R and
-/// patient responsibility sections with colored buckets and mix bars.
-fn build_doc(books: &Ledger, as_of: VirtualTime, provider: Option<&str>) -> Vec<Line<'static>> {
+/// The report for one selection: the outcome bars (final books) on top, the
+/// aging tables (intake snapshot) below.
+fn build_doc(output: &RunOutput, provider: Option<&str>) -> Vec<Line<'static>> {
+    let (books, as_of) = (&output.intake_ledger, output.intake_finished_at);
     let aging = ar_aging_for(books, as_of, provider);
     let dar = days_in_ar_for(books, as_of, provider);
 
     let scope = provider.unwrap_or("all providers");
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(format!(" {scope} — days in A/R: "), bold()),
-            Span::styled(format!("{dar:.1}"), theme::accent_bold()),
-            Span::styled(format!("   snapshot as of {as_of} (end of intake)"), dim()),
-        ]),
-        legend(),
-        Line::default(),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!(" {scope} — days in A/R: "), bold()),
+        Span::styled(format!("{dar:.1}"), theme::accent_bold()),
+        Span::styled(format!("   snapshot as of {as_of} (end of intake)"), dim()),
+    ])];
+    lines.push(Line::default());
+    lines.extend(outcome_lines(output, provider));
+    lines.push(Line::default());
+    lines.push(bucket_legend());
+    lines.push(Line::default());
     section(
         &mut lines,
         "Payer A/R — ages from first submission (retries never reset the clock)",
@@ -175,7 +182,96 @@ fn build_doc(books: &Ledger, as_of: VirtualTime, provider: Option<&str>) -> Vec<
     lines
 }
 
-fn legend() -> Line<'static> {
+const BAR_WIDTH: usize = 44;
+
+/// The claims funnel and money waterfall for this book, computed over the
+/// drained final ledger — where every claim ended up, next to how its money
+/// was aging mid-flight below.
+fn outcome_lines(output: &RunOutput, provider: Option<&str>) -> Vec<Line<'static>> {
+    let s = summarize_for(&output.ledger, provider);
+    let unaccounted = s.billed - s.payer_paid - s.patient_responsibility - s.not_allowed;
+    let total = s.total_claims.max(1) as f64;
+    let claim_pct = |n: usize| format!("{} ({})", thousands(n as u64), pct(n as f64 / total));
+    let money_pct = |m: Money| {
+        let share = if s.billed.cents() > 0 {
+            m.cents() as f64 / s.billed.cents() as f64
+        } else {
+            0.0
+        };
+        format!("{} ({})", money(m), pct(share))
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" claims — ", bold()),
+            Span::styled(thousands(s.total_claims as u64), theme::accent_bold()),
+            Span::styled(" ingested, every one driven terminal", bold()),
+        ]),
+        outcome_bar(&[
+            (s.resolved as f64, GOOD),
+            (s.rejected as f64, WARN),
+            (s.flagged as f64, BAD),
+            (s.non_terminal as f64, Color::Magenta),
+        ]),
+        outcome_legend(&[
+            (GOOD, "resolved", claim_pct(s.resolved)),
+            (WARN, "rejected at ingest", claim_pct(s.rejected)),
+            (BAD, "flagged", claim_pct(s.flagged)),
+        ]),
+    ];
+    if s.non_terminal > 0 {
+        lines.push(outcome_legend(&[(
+            Color::Magenta,
+            "non-terminal (BUG!)",
+            claim_pct(s.non_terminal),
+        )]));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled(" money — ", bold()),
+        Span::styled(money(s.billed), theme::accent_bold()),
+        Span::styled(" billed", bold()),
+    ]));
+    lines.push(outcome_bar(&[
+        (s.payer_paid.cents() as f64, GOOD),
+        (s.patient_responsibility.cents() as f64, ACCENT),
+        (s.not_allowed.cents() as f64, Color::Gray),
+        (unaccounted.cents() as f64, BAD),
+    ]));
+    lines.push(outcome_legend(&[
+        (GOOD, "payer paid", money_pct(s.payer_paid)),
+        (ACCENT, "patient owes", money_pct(s.patient_responsibility)),
+    ]));
+    let mut writeoffs = vec![(
+        Color::Gray,
+        "not allowed (write-off)",
+        money_pct(s.not_allowed),
+    )];
+    if unaccounted.cents() > 0 {
+        writeoffs.push((BAD, "unanswered on flagged", money_pct(unaccounted)));
+    }
+    lines.push(outcome_legend(&writeoffs));
+    lines
+}
+
+fn outcome_bar(segments: &[(f64, Color)]) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(theme::seg_bar(BAR_WIDTH, segments));
+    Line::from(spans)
+}
+
+fn outcome_legend(entries: &[(Color, &str, String)]) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (color, label, value)) in entries.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("   "));
+        }
+        spans.extend(swatch(*color, label, value.clone()));
+    }
+    Line::from(spans)
+}
+
+fn bucket_legend() -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (color, label) in BUCKET_COLORS
         .iter()

@@ -2,12 +2,12 @@
 //! move), a live status box pinned to the bottom, a `?` help overlay, and
 //! Enter on a claim drilling into its full audit trail.
 //!
-//! Pane map — the reports arranged as one instrument, money views first:
-//!   1 A/R Aging            per-provider aging books, colored buckets
+//! Pane map — the reports arranged as one instrument, money views first,
+//! every pane scrollable by provider:
+//!   1 A/R Aging            per-provider outcome bars + aging books
 //!   2 Payer Scorecard      graded payers + denial detail (scorecard ∪ denials)
 //!   3 Provider Insights    master–detail chase list with sortable claims
-//!   4 Simulation Overview  config, outcomes, and the fault ledger linking them
-//!   5 Simulation Timeline  the run replayed as rate + backlog charts
+//!   4 Timeline             the run replayed as rate + backlog charts, per book
 //!
 //! Threading: the TUI event loop owns the main thread on the *wall* clock;
 //! the simulation runs on its own multi-thread runtime behind a spawned
@@ -17,7 +17,6 @@
 
 mod aging;
 mod insights;
-mod overview;
 mod payers;
 mod theme;
 mod timeline;
@@ -58,17 +57,9 @@ pub struct TuiOptions {
 /// back so the caller can leave a plain-text record on stdout.
 pub fn run(mut cfg: RunConfig, opts: TuiOptions) -> anyhow::Result<RunOutput> {
     // The Payer Scorecard pane shows configured personalities next to the
-    // observed statistics, and the Overview breaks down the executed config —
-    // capture the values before cfg moves to the sim.
+    // observed statistics — capture them before cfg moves to the sim.
     let payer_configs = cfg.payers.clone();
     let payer_routes = cfg.payer_faults.clone();
-    let facts = overview::ConfigFacts {
-        seed: cfg.seed,
-        rate_per_sec: cfg.rate_per_sec,
-        policy: cfg.policy,
-        faults: cfg.faults,
-        route_count: cfg.payer_faults.len(),
-    };
 
     let (progress_tx, progress_rx) = watch::channel(Progress::default());
     cfg.progress = Some(progress_tx);
@@ -97,7 +88,6 @@ pub fn run(mut cfg: RunConfig, opts: TuiOptions) -> anyhow::Result<RunOutput> {
         &opts,
         payer_configs,
         payer_routes,
-        facts,
     );
     ratatui::restore();
     let _ = sim.join();
@@ -107,20 +97,18 @@ pub fn run(mut cfg: RunConfig, opts: TuiOptions) -> anyhow::Result<RunOutput> {
 const AGING: usize = 0;
 const PAYERS: usize = 1;
 const PROVIDERS: usize = 2;
-const OVERVIEW: usize = 3;
-// Pane 4, Simulation Timeline, is the draw dispatch's wildcard arm.
-const PANE_TITLES: [&str; 5] = [
+// Pane 3, Timeline, is the draw dispatch's wildcard arm.
+const PANE_TITLES: [&str; 4] = [
     "A/R Aging",
     "Payer Scorecard",
     "Provider Insights",
-    "Simulation Overview",
-    "Simulation Timeline",
+    "Timeline",
 ];
 
 /// One keys line, everywhere, always — the status box never rewords itself.
 /// Pane-specific instructions live in the hint row of the pane they belong
 /// to, and the full map is one `?` away.
-const KEYS_HINT: &str = "←/→ panes · 1-5 jump · ↑/↓ scroll/select · enter drill in · ? help · q quit (prints plain report)";
+const KEYS_HINT: &str = "←/→ panes · 1-4 jump · ↑/↓ scroll/select · enter drill in · ? help · q quit (prints plain report)";
 
 struct App {
     banner_rows: Vec<(String, String)>,
@@ -131,7 +119,6 @@ struct App {
     /// None while the simulation is still running.
     done: Option<Done>,
     pane: usize,
-    scroll: u16,
     frame: usize,
     help: bool,
 }
@@ -141,8 +128,7 @@ struct Done {
     /// Every open receivable, unordered; the insights view holds sorted
     /// index lists into this.
     chase: Vec<ChaseItem>,
-    timeline: timeline::Timeline,
-    overview: overview::Overview,
+    timeline: timeline::TimelineView,
     payers: payers::PayersView,
     aging: aging::AgingView,
     insights: insights::Insights,
@@ -155,7 +141,6 @@ struct Detail {
     scroll: u16,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     mut progress_rx: watch::Receiver<Progress>,
@@ -163,7 +148,6 @@ fn event_loop(
     opts: &TuiOptions,
     payer_configs: HashMap<PayerId, PayerConfig>,
     payer_routes: HashMap<PayerId, FaultProfile>,
-    facts: overview::ConfigFacts,
 ) -> anyhow::Result<RunOutput> {
     let mut app = App {
         banner_rows: opts.banner_rows.clone(),
@@ -173,7 +157,6 @@ fn event_loop(
         progress: Progress::default(),
         done: None,
         pane: 0,
-        scroll: 0,
         frame: 0,
         help: false,
     };
@@ -187,10 +170,8 @@ fn event_loop(
                 app.progress = final_progress(&output);
                 app.done = Some(Done::build(
                     output,
-                    &app.banner_rows,
                     payer_configs.clone(),
                     payer_routes.clone(),
-                    &facts,
                 ));
             }
         }
@@ -255,18 +236,9 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     let panes = PANE_TITLES.len();
     match code {
         KeyCode::Char('q') | KeyCode::Esc => return true,
-        KeyCode::Left => {
-            app.pane = (app.pane + panes - 1) % panes;
-            app.scroll = 0;
-        }
-        KeyCode::Right => {
-            app.pane = (app.pane + 1) % panes;
-            app.scroll = 0;
-        }
-        KeyCode::Char(c @ '1'..='5') => {
-            app.pane = c as usize - '1' as usize;
-            app.scroll = 0;
-        }
+        KeyCode::Left => app.pane = (app.pane + panes - 1) % panes,
+        KeyCode::Right => app.pane = (app.pane + 1) % panes,
+        KeyCode::Char(c @ '1'..='4') => app.pane = c as usize - '1' as usize,
         KeyCode::Up if app.pane == PROVIDERS => done.insights.move_selection(-1, &done.chase),
         KeyCode::Down if app.pane == PROVIDERS => done.insights.move_selection(1, &done.chase),
         KeyCode::PageUp if app.pane == PROVIDERS => done.insights.move_selection(-10, &done.chase),
@@ -275,30 +247,14 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Down if app.pane == PAYERS => done.payers.move_selection(1),
         KeyCode::PageUp if app.pane == PAYERS => done.payers.move_selection(-10),
         KeyCode::PageDown if app.pane == PAYERS => done.payers.move_selection(10),
-        KeyCode::Up if app.pane == AGING => done.aging.key_move(
-            -1,
-            &done.output.intake_ledger,
-            done.output.intake_finished_at,
-        ),
-        KeyCode::Down if app.pane == AGING => done.aging.key_move(
-            1,
-            &done.output.intake_ledger,
-            done.output.intake_finished_at,
-        ),
-        KeyCode::PageUp if app.pane == AGING => done.aging.key_move(
-            -10,
-            &done.output.intake_ledger,
-            done.output.intake_finished_at,
-        ),
-        KeyCode::PageDown if app.pane == AGING => done.aging.key_move(
-            10,
-            &done.output.intake_ledger,
-            done.output.intake_finished_at,
-        ),
-        KeyCode::Up => app.scroll = app.scroll.saturating_sub(1),
-        KeyCode::Down => app.scroll = app.scroll.saturating_add(1),
-        KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(10),
-        KeyCode::PageDown => app.scroll = app.scroll.saturating_add(10),
+        KeyCode::Up if app.pane == AGING => done.aging.key_move(-1, &done.output),
+        KeyCode::Down if app.pane == AGING => done.aging.key_move(1, &done.output),
+        KeyCode::PageUp if app.pane == AGING => done.aging.key_move(-10, &done.output),
+        KeyCode::PageDown if app.pane == AGING => done.aging.key_move(10, &done.output),
+        KeyCode::Up => done.timeline.move_selection(-1, &done.output),
+        KeyCode::Down => done.timeline.move_selection(1, &done.output),
+        KeyCode::PageUp => done.timeline.move_selection(-10, &done.output),
+        KeyCode::PageDown => done.timeline.move_selection(10, &done.output),
         KeyCode::Tab if app.pane == PROVIDERS => done.insights.toggle_focus(),
         KeyCode::Tab if app.pane == AGING => done.aging.toggle_focus(),
         KeyCode::Enter if app.pane == PROVIDERS => match done.insights.focus {
@@ -368,28 +324,19 @@ fn final_progress(output: &RunOutput) -> Progress {
 impl Done {
     fn build(
         output: RunOutput,
-        banner_rows: &[(String, String)],
         payer_configs: HashMap<PayerId, PayerConfig>,
         payer_routes: HashMap<PayerId, FaultProfile>,
-        facts: &overview::ConfigFacts,
     ) -> Done {
         let (books, as_of) = (&output.intake_ledger, output.intake_finished_at);
         let chase = chase_list(books, as_of, usize::MAX);
-        let timeline = timeline::timeline(
-            &output.ledger.event_log,
-            output.intake_finished_at,
-            output.finished_at,
-            timeline::TIMELINE_BUCKETS,
-        );
-        let overview = overview::build(&output, banner_rows, facts);
+        let timeline = timeline::build(&output);
         let payers = payers::build(&output, payer_configs, payer_routes);
-        let aging = aging::build(books, as_of);
+        let aging = aging::build(&output);
         let insights = insights::Insights::build(&chase);
         Done {
             output,
             chase,
             timeline,
-            overview,
             payers,
             aging,
             insights,
@@ -427,8 +374,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
                 AGING => aging::draw(frame, content, &mut done.aging),
                 PAYERS => payers::draw(frame, content, &mut done.payers),
                 PROVIDERS => insights::draw(frame, content, &mut done.insights, &done.chase),
-                OVERVIEW => overview::draw(frame, content, &done.overview, &mut app.scroll),
-                _ => timeline::draw(frame, content, &done.timeline),
+                _ => timeline::draw(frame, content, &mut done.timeline),
             }
 
             if let Some(detail) = &mut done.detail {
@@ -568,7 +514,7 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
     let lines = vec![
         section("Everywhere"),
         key("←/→", "move between panes"),
-        key("1-5", "jump straight to a pane"),
+        key("1-4", "jump straight to a pane"),
         key("↑/↓", "scroll, or move the selection"),
         key("pgup/pgdn", "the same, ten at a time"),
         key("enter", "drill into the selected row"),
@@ -576,7 +522,7 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         Line::default(),
         section("1 A/R Aging"),
         key("↑/↓", "pick a book — all providers first, then each one"),
-        key("tab", "hop over to scroll the aging tables"),
+        key("tab", "hop over to scroll the report"),
         Line::default(),
         section("2 Payer Scorecard"),
         key("↑/↓", "pick a payer; the detail below follows"),
@@ -588,6 +534,9 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
             "sort claims by cost / age / risk (again to flip)",
         ),
         key("enter", "on a claim: its full audit trail"),
+        Line::default(),
+        section("4 Timeline"),
+        key("↑/↓", "pick a book — the charts re-bucket to its claims"),
         Line::default(),
         Line::from(Span::styled("   any key closes this card", dim())),
     ];
@@ -923,32 +872,23 @@ mod render_tests {
             .apply(&mut cfg);
         let configs = cfg.payers.clone();
         let routes = cfg.payer_faults.clone();
-        let facts = overview::ConfigFacts {
-            seed: cfg.seed,
-            rate_per_sec: cfg.rate_per_sec,
-            policy: cfg.policy,
-            faults: cfg.faults,
-            route_count: cfg.payer_faults.len(),
-        };
         let output = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("runtime")
             .block_on(healthcare_billing_sim::run(cfg))
             .expect("run");
-        let banner = vec![
-            ("input".to_string(), "test.jsonl".to_string()),
-            ("seed".to_string(), "7".to_string()),
-        ];
         App {
-            banner_rows: banner.clone(),
+            banner_rows: vec![
+                ("input".to_string(), "test.jsonl".to_string()),
+                ("seed".to_string(), "7".to_string()),
+            ],
             seed: 7,
             wall_start: Instant::now(),
             wall_done: Some(Duration::from_secs(1)),
             progress: final_progress(&output),
-            done: Some(Done::build(output, &banner, configs, routes, &facts)),
+            done: Some(Done::build(output, configs, routes)),
             pane: 0,
-            scroll: 0,
             frame: 0,
             help: false,
         }
@@ -976,7 +916,6 @@ mod render_tests {
             "A/R Aging — all providers",
             "Configured —",
             "Providers —",
-            "Cause → effect",
             "Backlog",
         ];
         for (pane, marker) in markers.iter().enumerate() {
@@ -1002,7 +941,8 @@ mod render_tests {
         assert!(text.contains("event history"));
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
-        // The aging pane re-derives its tables for a single provider.
+        // The aging pane re-derives its report — outcome bars included —
+        // for a single provider.
         app.pane = AGING;
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         let selected = app
@@ -1017,6 +957,27 @@ mod render_tests {
         assert!(
             text.contains(&format!("A/R Aging — {selected}")),
             "per-provider aging title missing:\n{text}"
+        );
+        assert!(
+            text.contains("claims — ") && text.contains("money — "),
+            "outcome bars missing from the aging report:\n{text}"
+        );
+
+        // The timeline pane re-buckets its charts for a single provider.
+        app.pane = 3;
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        let selected = app
+            .done
+            .as_ref()
+            .expect("done")
+            .timeline
+            .selected_name()
+            .expect("a provider row")
+            .to_string();
+        let text = render(&mut app);
+        assert!(
+            text.contains(&format!("{selected} — ingested")),
+            "per-provider timeline title missing:\n{text}"
         );
     }
 
@@ -1082,50 +1043,23 @@ mod frame_dump {
             .apply(&mut cfg);
         let configs = cfg.payers.clone();
         let routes = cfg.payer_faults.clone();
-        let facts = overview::ConfigFacts {
-            seed: cfg.seed,
-            rate_per_sec: cfg.rate_per_sec,
-            policy: cfg.policy,
-            faults: cfg.faults,
-            route_count: cfg.payer_faults.len(),
-        };
         let output = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("rt")
             .block_on(healthcare_billing_sim::run(cfg))
             .expect("run");
-        let banner = vec![
-            (
+        let mut app = App {
+            banner_rows: vec![(
                 "input".to_string(),
                 "data/sample_claims_10k.jsonl (3.2 MB)".to_string(),
-            ),
-            ("seed".to_string(), "42".to_string()),
-            (
-                "ingest rate".to_string(),
-                "0.02 claims per virtual minute (one every 41.7 virtual minutes)".to_string(),
-            ),
-            (
-                "retry policy".to_string(),
-                "3 attempts · 45 virtual seconds timeout · 30 virtual seconds backoff base"
-                    .to_string(),
-            ),
-            (
-                "faults".to_string(),
-                "forward drops 3% · return drops 3% · duplicates 5% · delays 10% (≤60s)"
-                    .to_string(),
-            ),
-            ("config from".to_string(), "preset 'messy'".to_string()),
-        ];
-        let mut app = App {
-            banner_rows: banner.clone(),
+            )],
             seed: 42,
             wall_start: Instant::now(),
             wall_done: Some(Duration::from_secs(2)),
             progress: final_progress(&output),
-            done: Some(Done::build(output, &banner, configs, routes, &facts)),
+            done: Some(Done::build(output, configs, routes)),
             pane: 0,
-            scroll: 0,
             frame: 0,
             help: false,
         };
@@ -1135,6 +1069,13 @@ mod frame_dump {
             app.pane = pane;
             dump(&mut app, &dir, &format!("pane{pane}"));
         }
+        // Per-provider variants of the two master–detail report panes.
+        app.pane = AGING;
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        dump(&mut app, &dir, "pane0-provider");
+        app.pane = 3;
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        dump(&mut app, &dir, "pane3-provider");
         app.help = true;
         dump(&mut app, &dir, "help");
         app.help = false;
