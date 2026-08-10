@@ -43,35 +43,50 @@ cargo clippy --all-targets -- -D warnings
 
 ## CLI
 
-On a real terminal, runs open an **interactive UI**: the reports are panes on
-a static screen, opening on the Timeline — ←/→ to move between Timeline,
-Overview, Aging (payer A/R and patient responsibility as two sections),
-Scorecard, Denials, Provider Insights, and Diagnostic; ↑/↓ scrolls (or
-selects rows in the focused list). The **Provider Insights pane** is a
-master–detail view: scroll a list of billing organizations (100 in the
-sample, sorted by total outstanding) and the panel beside it live-updates
-with that provider's open claims — outstanding, age, and a risk score
-(dollars × days stuck), sortable by **c**ost, **a**ge, or **r**isk in
-either direction (press the key again to flip). Statuses are plain
-English, derived from the claim's evidence — "awaiting 1st response",
-"retrying (attempt 3)", "partial remit (2/4 lines)", "flagged: doesn't sum
-(short $0.83)", "flagged: no response, gave up". Tab (or Enter on a
-provider) moves focus into the claims list; **Enter on a claim opens its
-full audit trail** — every event with virtual timestamps, straight from
-the event-sourced ledger, plus a what-this-means paragraph explaining the
-claim's status in simulation terms (why silence is ambiguous, why disputed
-figures are never booked). Each pane carries its own instructions at the
-top; the status box at the bottom never changes its text. The **Timeline pane charts the run**: a 2×2 grid of
-small multiples — per-virtual-day rates for ingested, submitted, remitted,
-and settled on one shared scale, so submitted riding above ingested reads
-as retry traffic (the fault injection made visible) — over a chart of the
+On a real terminal, runs open an **interactive UI**: five panes on a
+numbered tab bar, opening on the Timeline — ←/→ (or 1–5) to move between
+**Timeline**, **Overview**, **Payer Scorecard**, **A/R Aging**, and
+**Provider Insights**; ↑/↓ scrolls (or selects rows in the focused list),
+`?` opens a keyboard map, and each pane carries its own hint row at the
+top while the status box at the bottom never changes its text. The
+**Timeline pane charts the run**: a 2×2 grid of small multiples —
+per-virtual-day rates for ingested, submitted, remitted, and settled on
+one shared scale, so submitted riding above ingested reads as retry
+traffic (the fault injection made visible) — over a chart of the
 in-flight backlog, which rises through intake and drains to zero: the
-correctness guarantee as a picture. All replayed from the retained event
-log. A live status box pinned to the bottom shows
-claims/resolved/rejected/flagged, the virtual clock, and wall time while the
-run is in flight. `q` quits and prints the plain report so a record stays in
-your scrollback. When stdout is not a terminal (pipes, CI) or with
-`--no-tui`, output is the plain sequential report.
+correctness guarantee as a picture, replayed from the retained event log.
+The **Overview pane is the whole run on one page**: the configuration
+that went in, the outcomes that came out (a claims funnel and a money
+waterfall as proportional bars), and between them the cause→effect table
+— every injected fault kind (ground truth) beside the symptom it left on
+the biller's books. The **Payer Scorecard pane** merges the scorecard and
+denial reports into a league table graded on the curve (A–F from denial
+rate, response time, and paid share, best to worst, with inline bars);
+↑/↓ picks a payer and the detail below shows its configured personality
+next to what the remittances revealed — the closed loop on one screen —
+plus its denial breakdown by reason. The **A/R Aging pane** colors the
+aging buckets green → red with a per-payer mix bar. The **Provider
+Insights pane** is a master–detail view: scroll a list of billing
+organizations (100 in the sample, sorted by total outstanding) and the
+panel beside it live-updates with that provider's open claims —
+outstanding, age, and a risk score (dollars × days stuck), sortable by
+**c**ost, **a**ge, or **r**isk in either direction (press the key again
+to flip). Statuses are plain English, derived from the claim's evidence —
+"awaiting 1st response", "retrying (attempt 3)", "partial remit (2/4
+lines)", "flagged: doesn't sum (short $0.83)", "flagged: no response,
+gave up". Tab (or Enter on a provider) moves focus into the claims list;
+**Enter on a claim opens its full audit trail** — every event with
+virtual timestamps, straight from the event-sourced ledger, plus a
+what-this-means paragraph explaining the claim's status in simulation
+terms (why silence is ambiguous, why disputed figures are never booked).
+A live status
+box pinned to the bottom shows claims/resolved/rejected/flagged, the
+virtual clock, and wall time (plus a drain gauge while the run is in
+flight). `q` quits and prints the plain report so a record stays in your
+scrollback. When stdout is not a terminal (pipes, CI) or with `--no-tui`,
+output is the plain sequential report — that path still prints every
+report, including the standalone denial breakdown and sim-truth
+diagnostic that the UI folds into its merged panes.
 
 The input file is the single required argument (one PayerClaim JSON object
 per line; schema in `docs/TAKE_HOME_PROMPT.MD`). Everything else is an

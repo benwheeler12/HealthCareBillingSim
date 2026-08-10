@@ -399,6 +399,35 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     lines, and corruption produces garbage (silence), never plausible-but-
     wrong line ids. It exists as biller self-defense and is unit-tested only.
 
+26. **TUI audit: five panes, one visual language.** The seven-pane layout
+    had two weak screens (Overview and Diagnostic were thin text dumps) and
+    two near-duplicates (Scorecard and Denials cover the same remittance
+    data). Collapsed to five: Timeline · Overview · Payer Scorecard · A/R
+    Aging · Provider Insights. The merged Overview is the run on one page —
+    configuration left, outcomes right (claims funnel + money waterfall as
+    proportional bars), and the old diagnostic reborn as a cause→effect
+    table: each injected fault kind (ground truth) beside the symptom it
+    left on the books, which is the input→output link made explicit. The
+    merged Payer Scorecard is a league table graded on the curve (A–F over
+    denial rate / response time / paid share) whose selection drives a
+    detail panel: configured personality vs what the remittances revealed
+    (the closed-loop demo on one screen) plus that payer's denial reasons.
+    `tui.rs` split into a module tree (`tui/{theme,timeline,overview,
+    payers,aging,insights}`) with a shared theme — one accent, one hint
+    style, one bar vocabulary (largest-remainder segment bars, unit-tested)
+    — plus numbered tabs with 1-5 jumps, a `?` keyboard-map overlay, a
+    scrollable styled audit-trail overlay, and a drain gauge while the run
+    is in flight. The pane-hint/static-status convention from #24 stands.
+    The plain `--no-tui` report is untouched (still prints the standalone
+    denial breakdown and diagnostic), so the assessment contract and
+    report-text tests hold. Render smoke tests draw every pane and overlay
+    into a `TestBackend` over a real messy run; an ignored `dump_frames`
+    test writes full frames to `target/frames/` for eyeballing layout
+    changes without a terminal session. The plain-English status labels and
+    what-this-means explanations from #25 carry through: the claims table
+    renders `status_label` verbatim, and the audit-trail overlay's decoder
+    paragraphs are word-wrapped, styled lines under the same theme.
+
 ## Module layout
 
 ```
@@ -408,6 +437,7 @@ src/
   biller/    claim_task, dispatcher, retry policy
   ledger/    events, records, fold
   reports/   pure fns over ledger snapshot
+  tui/       interactive UI: mod (app/keys/overlays), theme, one module per pane
   main.rs    config, wiring, shutdown
 ```
 Rule: `sim` and `biller` may not import each other. `reports` depends only on `ledger`.

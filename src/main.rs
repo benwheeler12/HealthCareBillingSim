@@ -165,15 +165,11 @@ fn main() -> anyhow::Result<()> {
     // CI, and --no-tui — that path still satisfies the assessment's
     // "serialize to terminal, then shut down" contract verbatim.
     if interactive {
-        let banner = banner_rows(&cli, &cfg, &provenance)
-            .into_iter()
-            .map(|(label, value)| format!("{label:<20} {value}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let rows = banner_rows(&cli, &cfg, &provenance);
         let output = tui::run(
             cfg,
             tui::TuiOptions {
-                banner,
+                banner_rows: rows,
                 seed: cli.seed,
                 threads: cli.threads,
             },
@@ -337,12 +333,12 @@ fn banner_rows(cli: &Cli, cfg: &RunConfig, provenance: &[String]) -> Vec<(String
                 human_virtual(cfg.policy.backoff_base.as_secs_f64()),
             ),
         ),
-        ("faults".to_string(), fault_summary(&cfg.faults)),
+        ("faults".to_string(), cfg.faults.summary()),
     ];
     for payer in healthcare_billing_sim::domain::PayerId::ALL {
         let p = &cfg.payers[&payer];
         let route = match cfg.payer_faults.get(&payer) {
-            Some(profile) => format!(" · route: {}", fault_summary(profile)),
+            Some(profile) => format!(" · route: {}", profile.summary()),
             None => String::new(),
         };
         rows.push((
@@ -374,44 +370,6 @@ fn print_banner(cli: &Cli, cfg: &RunConfig, provenance: &[String], style: &Style
         println!("  {bold}{label:<20}{reset} {value}");
     }
     println!("{dim}{}{reset}\n", "─".repeat(72));
-}
-
-fn fault_summary(f: &healthcare_billing_sim::sim::faults::FaultProfile) -> String {
-    let pct = |x: f64| format!("{:.0}%", x * 100.0);
-    let mut parts = Vec::new();
-    if f.forward_drop_rate > 0.0 {
-        parts.push(format!("forward drops {}", pct(f.forward_drop_rate)));
-    }
-    if f.return_drop_rate > 0.0 {
-        parts.push(format!("return drops {}", pct(f.return_drop_rate)));
-    }
-    if f.duplicate_rate > 0.0 {
-        parts.push(format!("duplicates {}", pct(f.duplicate_rate)));
-    }
-    if f.extra_delay_rate > 0.0 {
-        parts.push(format!(
-            "delays {} (≤{})",
-            pct(f.extra_delay_rate),
-            human_short(f.max_extra_delay_secs)
-        ));
-    }
-    if f.dishonest_adjudication_rate > 0.0 {
-        parts.push(format!("dishonest {}", pct(f.dishonest_adjudication_rate)));
-    }
-    if f.line_drop_rate > 0.0 {
-        parts.push(format!("line drops {}", pct(f.line_drop_rate)));
-    }
-    if f.corrupt_claim_id_rate > 0.0 {
-        parts.push(format!("corrupt ids {}", pct(f.corrupt_claim_id_rate)));
-    }
-    if f.corrupt_remittance_rate > 0.0 {
-        parts.push(format!("garbage {}", pct(f.corrupt_remittance_rate)));
-    }
-    if parts.is_empty() {
-        "none — honest, lossless transport".to_string()
-    } else {
-        parts.join(" · ")
-    }
 }
 
 /// Live progress line on stderr, tty-only, throttled by wall clock. Reads the
