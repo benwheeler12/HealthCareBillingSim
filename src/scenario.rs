@@ -277,7 +277,9 @@ pub fn preset(name: &str) -> Option<Scenario> {
             // The other route personalities, quieter but distinct: kaiser's
             // route is nearly perfect; molina's is anthem's little sibling;
             // centene loses claims outright; bcbs's clearinghouse route
-            // stutters with duplicates.
+            // stutters with duplicates; humana's paperwork sheds individual
+            // service lines (partial remits); cigna's route garbles whole
+            // remittances and claim_ids (garbage-as-silence, quarantine).
             let kaiser = scenario
                 .payers
                 .get_mut(&PayerId::KaiserPermanente)
@@ -310,6 +312,17 @@ pub fn preset(name: &str) -> Option<Scenario> {
                 .expect("base");
             bcbs.faults = FaultPatch {
                 duplicate_rate: Some(0.15),
+                ..FaultPatch::default()
+            };
+            let humana = scenario.payers.get_mut(&PayerId::Humana).expect("base");
+            humana.faults = FaultPatch {
+                line_drop_rate: Some(0.12),
+                ..FaultPatch::default()
+            };
+            let cigna = scenario.payers.get_mut(&PayerId::Cigna).expect("base");
+            cigna.faults = FaultPatch {
+                corrupt_remittance_rate: Some(0.06),
+                corrupt_claim_id_rate: Some(0.04),
                 ..FaultPatch::default()
             };
         }
@@ -398,6 +411,12 @@ mod tests {
         assert!(medicare.forward_drop_rate < cfg.faults.forward_drop_rate);
         assert!(medicare.dishonest_adjudication_rate > 0.0);
         assert_eq!(anthem.dishonest_adjudication_rate, 0.0);
+        // Humana sheds service lines; cigna garbles remittances — the
+        // semantic fault classes stay visible in a flag-free run.
+        assert!(cfg.payer_faults[&PayerId::Humana].line_drop_rate > 0.0);
+        let cigna = cfg.payer_faults[&PayerId::Cigna];
+        assert!(cigna.corrupt_remittance_rate > 0.0);
+        assert!(cigna.corrupt_claim_id_rate > 0.0);
 
         // Chaos: everything on, tight budget.
         let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);

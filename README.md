@@ -52,10 +52,15 @@ master–detail view: scroll a list of billing organizations (100 in the
 sample, sorted by total outstanding) and the panel beside it live-updates
 with that provider's open claims — outstanding, age, and a risk score
 (dollars × days stuck), sortable by **c**ost, **a**ge, or **r**isk in
-either direction (press the key again to flip). Tab (or Enter on a
+either direction (press the key again to flip). Statuses are plain
+English, derived from the claim's evidence — "awaiting 1st response",
+"retrying (attempt 3)", "partial remit (2/4 lines)", "flagged: doesn't sum
+(short $0.83)", "flagged: no response, gave up". Tab (or Enter on a
 provider) moves focus into the claims list; **Enter on a claim opens its
 full audit trail** — every event with virtual timestamps, straight from
-the event-sourced ledger. Each pane carries its own instructions at the
+the event-sourced ledger, plus a what-this-means paragraph explaining the
+claim's status in simulation terms (why silence is ambiguous, why disputed
+figures are never booked). Each pane carries its own instructions at the
 top; the status box at the bottom never changes its text. The **Timeline pane charts the run**: a 2×2 grid of
 small multiples — per-virtual-day rates for ingested, submitted, remitted,
 and settled on one shared scale, so submitted riding above ingested reads
@@ -78,9 +83,11 @@ Configuration layers, later wins: **defaults → `--preset` →
 `--fault-profile` file → individual flags.**
 
 - `--preset honest|messy|chaos` — **defaults to `messy`** (drops, duplicates,
-  delays: the assessment's "bake in a little unreliability"). `honest` is the
-  lossless baseline; `chaos` is everything at once with a slow, denial-happy
-  anthem.
+  delays: the assessment's "bake in a little unreliability"), with per-route
+  personalities: a lossy, slow anthem; a clean but occasionally lying
+  medicare; humana shedding individual service lines (partial remits);
+  cigna garbling remittances and claim_ids. `honest` is the lossless
+  baseline; `chaos` is everything at once with a slow, denial-happy anthem.
 - `--fault-profile FILE` — scenario JSON for precise control
   (`data/demo_scenario.json` is a template; unknown fields are rejected).
 - Individual knobs: `--forward-drop-rate`, `--return-drop-rate`,

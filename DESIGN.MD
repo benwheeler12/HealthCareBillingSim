@@ -378,6 +378,27 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     stopped being the canonical unknown payer in tests and the generator's
     malformed lines the moment it became real ("acme_health" now).
 
+25. **Status surface in plain English; messy widens the visible fault mix.**
+    The chase-list status column (and provider insights with it) derives its
+    label from the whole record, not the state alone: `AwaitingResponse`
+    splits into "awaiting 1st response" / "retrying (attempt N)" / "partial
+    remit (k/n lines)" using evidence already on the record (attempt count,
+    answered lines) — no new lifecycle states, honoring the small state
+    space litigated above. Flags render their cause with the money delta
+    ("flagged: doesn't sum (short $0.83)"). The claim-detail overlay appends
+    a what-this-means paragraph per state — snapshot and final when they
+    differ — phrased in simulation terms (silence is indistinguishable from
+    drops; disputed figures are never booked). The messy preset gains two
+    quiet route personalities so the default run keeps the remaining
+    reachable fault classes visible: humana's route sheds individual service
+    lines (3.3 — partial remits in the wild), cigna's route garbles whole
+    remittances and claim_ids (3.5/3.2 — garbage-as-silence and quarantine,
+    visible in histories and the diagnostic). Reachability note, recorded
+    deliberately: `Flagged(MalformedRemittance)` cannot occur from the
+    simulation by construction — payer remits derive from the claim's own
+    lines, and corruption produces garbage (silence), never plausible-but-
+    wrong line ids. It exists as biller self-defense and is unit-tested only.
+
 ## Module layout
 
 ```
