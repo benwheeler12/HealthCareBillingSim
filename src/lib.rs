@@ -12,7 +12,7 @@ pub mod sim;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -20,11 +20,11 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::biller::claim_task::{ClaimTaskDeps, run_claim};
-use crate::biller::dispatcher::run_dispatcher;
+use crate::biller::dispatcher::run_quarantine;
 use crate::biller::policy::RetryPolicy;
-use crate::domain::{Claim, ClaimId, Clock, PayerId, VirtualTime, validation};
+use crate::domain::{Claim, ClaimId, PayerId, VirtualTime, validation};
 use crate::ledger::events::{ClaimEvent, LedgerTx};
-use crate::ledger::fold::{FoldOutput, Progress, run_fold};
+use crate::ledger::fold::{FoldOutput, Progress, finalize, run_fold};
 use crate::ledger::records::{ClaimIdentity, Ledger, LineRecord};
 use crate::sim::clearinghouse::Clearinghouse;
 use crate::sim::faults::FaultProfile;
@@ -81,28 +81,22 @@ pub struct RunOutput {
 
 /// Run the whole simulation to completion.
 ///
-/// Must run inside a current-thread runtime with `start_paused(true)`
-/// (Decisions #12). Shutdown is structural: input exhausted + claim-task
-/// JoinSet drained ⇒ channels close in dependency order ⇒ the ledger fold
-/// returns ⇒ done. No shutdown signals anywhere.
+/// Time is computed, never slept (Decisions #23), so this runs on any tokio
+/// runtime — the multi-thread scheduler by default, where claim tasks
+/// genuinely execute in parallel. Shutdown is structural: input exhausted +
+/// claim-task JoinSet drained ⇒ channels close in dependency order ⇒ the
+/// ledger fold returns ⇒ done. No shutdown signals anywhere.
 pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
-    let clock = Clock::start();
+    // Deep buffer: with parallel producers the fold must almost never make a
+    // sender park — backpressure only matters if the fold truly falls behind.
+    let (ledger_tx, ledger_rx) = mpsc::channel(65_536);
+    let (strays_tx, strays_rx) = mpsc::channel(256);
+    let (sim_truth_tx, sim_truth_rx) = mpsc::unbounded_channel();
+    let ledger_tx = LedgerTx::new(ledger_tx);
 
-    let (ledger_tx, ledger_rx) = mpsc::channel(1024);
-    let (submission_tx, submission_rx) = mpsc::channel(256);
-    let (remit_tx, remit_rx) = mpsc::channel(256);
-    let (dispatcher_tx, dispatcher_rx) = mpsc::channel(256);
-    let (sim_truth_tx, sim_truth_rx) = mpsc::channel(256);
-    let ledger_tx = LedgerTx::new(ledger_tx, clock.clone());
-
-    let intake_done: Arc<OnceLock<VirtualTime>> = Arc::new(OnceLock::new());
-    let fold = tokio::spawn(run_fold(
-        ledger_rx,
-        cfg.progress.take(),
-        intake_done.clone(),
-    ));
+    let fold = tokio::spawn(run_fold(ledger_rx, cfg.progress.take()));
     let recorder = tokio::spawn(run_recorder(sim_truth_rx));
-    let dispatcher = tokio::spawn(run_dispatcher(dispatcher_rx, remit_rx, ledger_tx.clone()));
+    let clerk = tokio::spawn(run_quarantine(strays_rx, ledger_tx.clone()));
     let resolved_faults = cfg
         .payers
         .keys()
@@ -111,40 +105,57 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
             (*payer, profile)
         })
         .collect();
-    let clearinghouse = Clearinghouse {
+    let clearinghouse = Arc::new(Clearinghouse {
         payers: cfg.payers.clone(),
         rng: RngFactory::new(cfg.seed),
         faults: resolved_faults,
         sim_truth: sim_truth_tx,
-    };
-    let clearinghouse = tokio::spawn(clearinghouse.run(submission_rx, remit_tx));
+    });
 
     let deps = ClaimTaskDeps {
         policy: cfg.policy,
-        clock,
         ledger: ledger_tx.clone(),
-        clearinghouse_tx: submission_tx,
-        dispatcher_tx,
+        clearinghouse,
+        strays_tx,
     };
-    let clock_for_reports = deps.clock.clone();
-    let mut claim_tasks = ingest(&cfg, &ledger_tx, &deps).await?;
-    drop(deps);
-    // Set synchronously before any further await: virtual time cannot have
-    // advanced past this instant, so the fold's snapshot check is race-free.
-    let intake_finished_at = clock_for_reports.now();
-    let _ = intake_done.set(intake_finished_at);
+    // Phase timing for benchmark analysis (SIM_PHASES=1): wall time per
+    // pipeline stage, to separate the parallel region from the serial ones.
+    let phases = std::env::var_os("SIM_PHASES").is_some();
+    let t0 = std::time::Instant::now();
+    let (mut claim_tasks, intake_finished_at) = ingest(&cfg, &ledger_tx, &deps).await?;
+    drop(deps); // releases our strays_tx + clearinghouse handles
+    let t_ingest = t0.elapsed();
 
     while let Some(joined) = claim_tasks.join_next().await {
         joined.context("claim task panicked")?;
     }
-    clearinghouse.await.context("clearinghouse panicked")?;
-    dispatcher.await.context("dispatcher panicked")?;
+    // Every claim task is done ⇒ every strays sender is dropped ⇒ the clerk
+    // drains and exits; it holds a ledger sender, so it must finish before
+    // the fold can.
+    clerk.await.context("quarantine clerk panicked")?;
     drop(ledger_tx);
+    let ledger = fold.await.context("ledger fold panicked")?;
+    let sim_truth = recorder.await.context("sim-truth recorder panicked")?;
+    let t_drain = t0.elapsed();
+
+    let finished_at = ledger
+        .event_log
+        .iter()
+        .map(|e| e.at)
+        .max()
+        .unwrap_or_default();
     let FoldOutput {
         ledger,
         intake_snapshot,
-    } = fold.await.context("ledger fold panicked")?;
-    let sim_truth = recorder.await.context("sim-truth recorder panicked")?;
+    } = finalize(ledger, intake_finished_at);
+    if phases {
+        eprintln!(
+            "SIM_PHASES ingest={:.2}s drain={:.2}s finalize={:.2}s",
+            t_ingest.as_secs_f64(),
+            (t_drain - t_ingest).as_secs_f64(),
+            (t0.elapsed() - t_drain).as_secs_f64(),
+        );
+    }
 
     tracing::info!(
         claims = ledger.claims.len(),
@@ -156,66 +167,135 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
         intake_ledger: intake_snapshot,
         sim_truth,
         intake_finished_at,
-        finished_at: clock_for_reports.now(),
+        finished_at,
     })
 }
 
-/// Read the input file at the configured rate, validate each line, and spawn
-/// one claim task per valid claim. Malformed lines become Rejected ledger
-/// rows — never silent drops.
+/// Read the input file, validate each line, and spawn one claim task per
+/// valid claim. Malformed lines become Rejected ledger rows — never silent
+/// drops. The configured rate assigns each line its computed arrival time —
+/// line i lands at i × (1/rate), exactly where the rate-limited sleep loop
+/// used to put it — and returns the last arrival as the intake-end mark.
+///
+/// Validation (JSON parsing — the CPU cost of ingest) runs in parallel:
+/// lines are read in batches, fanned out to one validator task per worker,
+/// and the verdicts are consumed strictly in input order, so dedup ("first
+/// document wins") and every emitted event are byte-identical to the serial
+/// loop. Only the pure parse is parallel; the bookkeeping stays sequential.
 async fn ingest(
     cfg: &RunConfig,
     ledger: &LedgerTx,
     deps: &ClaimTaskDeps,
-) -> anyhow::Result<JoinSet<()>> {
+) -> anyhow::Result<(JoinSet<()>, VirtualTime)> {
+    const BATCH: usize = 16 * 1024;
     let file = std::fs::File::open(&cfg.input_path)
         .with_context(|| format!("opening {}", cfg.input_path.display()))?;
     let reader = std::io::BufReader::new(file);
     let interval = Duration::from_secs_f64(1.0 / cfg.rate_per_sec);
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
 
     let mut tasks = JoinSet::new();
     let mut seen = std::collections::HashSet::new();
-    for (line_no, line) in reader.lines().enumerate() {
-        let line = line.context("reading input")?;
-        let line_no = line_no + 1; // 1-based for humans
-        tokio::time::sleep(interval).await;
-        match validation::validate_line(&line) {
-            // Fault 1.3: a claim_id we've already ingested. First document
-            // wins; the dup becomes a history event, never a resubmission.
-            Ok(claim) if seen.contains(&claim.claim_id) => {
-                tracing::debug!(claim_id = %claim.claim_id, line_no, "duplicate claim_id in input");
-                ledger
-                    .emit(claim.claim_id, ClaimEvent::DuplicateIngest { line_no })
-                    .await;
-            }
-            // Fault 1.4: schema-valid but nothing billable. Policy: resolved
-            // trivially at ingest — correct books with zero submissions.
-            Ok(claim) if claim.billable_lines().count() == 0 => {
-                tracing::debug!(claim_id = %claim.claim_id, "no billable lines; trivially resolved");
-                seen.insert(claim.claim_id.clone());
-                ledger
-                    .emit(claim.claim_id.clone(), ingested_event(&claim))
-                    .await;
-                ledger.emit(claim.claim_id, ClaimEvent::Resolved).await;
-            }
-            Ok(claim) => {
-                tracing::debug!(claim_id = %claim.claim_id, payer = %claim.payer_id, "claim ingested");
-                seen.insert(claim.claim_id.clone());
-                ledger
-                    .emit(claim.claim_id.clone(), ingested_event(&claim))
-                    .await;
-                tasks.spawn(run_claim(claim, deps.clone()));
-            }
-            Err((claim_id, reason)) => {
-                let claim_id =
-                    claim_id.unwrap_or_else(|| ClaimId(format!("<unparseable-line-{line_no}>")));
-                tracing::debug!(%claim_id, ?reason, "claim rejected at ingest");
-                seen.insert(claim_id.clone());
-                ledger.emit(claim_id, ClaimEvent::Rejected { reason }).await;
+    let mut arrival = VirtualTime::default();
+    let mut line_no = 0usize;
+    let mut lines = reader.lines();
+    loop {
+        let mut batch = Vec::with_capacity(BATCH);
+        for line in lines.by_ref().take(BATCH) {
+            batch.push(line.context("reading input")?);
+        }
+        if batch.is_empty() {
+            break;
+        }
+        let chunk_size = batch.len().div_ceil(workers);
+        let mut chunks: Vec<Vec<String>> = Vec::with_capacity(workers);
+        let mut rest = batch;
+        while rest.len() > chunk_size {
+            let tail = rest.split_off(chunk_size);
+            chunks.push(rest);
+            rest = tail;
+        }
+        chunks.push(rest);
+        let validators: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                tokio::spawn(async move {
+                    chunk
+                        .iter()
+                        .map(|line| validation::validate_line(line))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for validator in validators {
+            let verdicts = validator.await.context("validator task panicked")?;
+            for verdict in verdicts {
+                line_no += 1;
+                arrival = arrival + interval;
+                ingest_one(
+                    verdict, line_no, arrival, ledger, deps, &mut seen, &mut tasks,
+                )
+                .await;
             }
         }
     }
-    Ok(tasks)
+    Ok((tasks, arrival))
+}
+
+/// The sequential ingest state machine for one verdict, in input order.
+#[allow(clippy::too_many_arguments)]
+async fn ingest_one(
+    verdict: Result<Claim, (Option<ClaimId>, domain::ValidationError)>,
+    line_no: usize,
+    arrival: VirtualTime,
+    ledger: &LedgerTx,
+    deps: &ClaimTaskDeps,
+    seen: &mut std::collections::HashSet<ClaimId>,
+    tasks: &mut JoinSet<()>,
+) {
+    match verdict {
+        // Fault 1.3: a claim_id we've already ingested. First document
+        // wins; the dup becomes a history event, never a resubmission.
+        Ok(claim) if seen.contains(&claim.claim_id) => {
+            tracing::debug!(claim_id = %claim.claim_id, line_no, "duplicate claim_id in input");
+            ledger
+                .emit(
+                    arrival,
+                    claim.claim_id,
+                    ClaimEvent::DuplicateIngest { line_no },
+                )
+                .await;
+        }
+        // Fault 1.4: schema-valid but nothing billable. Policy: resolved
+        // trivially at ingest — correct books with zero submissions.
+        Ok(claim) if claim.billable_lines().count() == 0 => {
+            tracing::debug!(claim_id = %claim.claim_id, "no billable lines; trivially resolved");
+            seen.insert(claim.claim_id.clone());
+            ledger
+                .emit(arrival, claim.claim_id.clone(), ingested_event(&claim))
+                .await;
+            ledger
+                .emit(arrival, claim.claim_id, ClaimEvent::Resolved)
+                .await;
+        }
+        Ok(claim) => {
+            tracing::debug!(claim_id = %claim.claim_id, payer = %claim.payer_id, "claim ingested");
+            seen.insert(claim.claim_id.clone());
+            ledger
+                .emit(arrival, claim.claim_id.clone(), ingested_event(&claim))
+                .await;
+            tasks.spawn(run_claim(claim, arrival, deps.clone()));
+        }
+        Err((claim_id, reason)) => {
+            let claim_id =
+                claim_id.unwrap_or_else(|| ClaimId(format!("<unparseable-line-{line_no}>")));
+            tracing::debug!(%claim_id, ?reason, "claim rejected at ingest");
+            seen.insert(claim_id.clone());
+            ledger
+                .emit(arrival, claim_id, ClaimEvent::Rejected { reason })
+                .await;
+        }
+    }
 }
 
 fn ingested_event(claim: &Claim) -> ClaimEvent {

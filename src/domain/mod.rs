@@ -9,8 +9,10 @@ pub mod time;
 pub mod validation;
 
 pub use claim::{Claim, ClaimId, PayerId, ServiceLine};
-pub use messages::{Delivery, Submission, SubmittedClaim, SubmittedLine};
+pub use messages::{
+    Arrival, Delivery, Submission, SubmittedClaim, SubmittedLine, Transaction, Transactor,
+};
 pub use money::Money;
 pub use remittance::{DenialReason, RemittanceAdvice, RemittanceLine};
-pub use time::{Clock, VirtualTime, human_virtual};
+pub use time::{VirtualTime, human_virtual};
 pub use validation::ValidationError;

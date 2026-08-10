@@ -1,5 +1,5 @@
-//! Virtual time. All timestamps are durations since simulation start on the
-//! paused tokio clock — never wall-clock (Decisions #12).
+//! Virtual time. All timestamps are durations since simulation start,
+//! computed — never read from any clock, wall or paused (Decisions #23).
 
 use std::fmt;
 use std::ops::Add;
@@ -33,26 +33,6 @@ impl fmt::Display for VirtualTime {
         } else {
             write!(f, "t+{secs:.3}s")
         }
-    }
-}
-
-/// Handle on the simulation's start instant; cloned into every component that
-/// stamps events. Reads the paused tokio clock, so `now()` is virtual.
-#[derive(Clone, Debug)]
-pub struct Clock {
-    start: tokio::time::Instant,
-}
-
-impl Clock {
-    /// Must be called inside the (paused) runtime, at simulation start.
-    pub fn start() -> Clock {
-        Clock {
-            start: tokio::time::Instant::now(),
-        }
-    }
-
-    pub fn now(&self) -> VirtualTime {
-        VirtualTime(self.start.elapsed())
     }
 }
 

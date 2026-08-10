@@ -147,3 +147,34 @@ fn all_faults_at_once_every_claim_terminal_and_deterministic() {
     assert_eq!(fingerprint(&output), fingerprint(&rerun));
     assert_ne!(fingerprint(&output), fingerprint(&chaos(7)), "seeds differ");
 }
+
+/// Decisions #23: computed time on the multi-thread scheduler. Not just
+/// outcomes — the *entire finalized event log*, timestamps and order
+/// included, must be identical across runs no matter how the worker threads
+/// interleave. This is the test that replaces the paused-clock spike as the
+/// foundation the design leans on.
+#[test]
+fn full_event_log_is_identical_across_parallel_runs() {
+    let input: Vec<String> = (0..80).map(simple_claim).collect();
+    let path = write_input("parallel_determinism.jsonl", &input);
+    let run_once = || {
+        let mut cfg = RunConfig::new(path.clone(), 42, 10.0);
+        cfg.faults.forward_drop_rate = 0.1;
+        cfg.faults.duplicate_rate = 0.1;
+        cfg.faults.extra_delay_rate = 0.2;
+        cfg.faults.max_extra_delay_secs = 300.0;
+        run_sim_with(cfg)
+    };
+    let log = |o: &healthcare_billing_sim::RunOutput| -> Vec<String> {
+        o.ledger
+            .event_log
+            .iter()
+            .map(|e| format!("{:?} {} {:?}", e.at, e.claim_id, e.event))
+            .collect()
+    };
+    let (a, b) = (run_once(), run_once());
+    assert!(!log(&a).is_empty());
+    assert_eq!(log(&a), log(&b), "event logs diverged across parallel runs");
+    assert_eq!(a.finished_at, b.finished_at);
+    assert_eq!(a.intake_finished_at, b.intake_finished_at);
+}

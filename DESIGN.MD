@@ -326,6 +326,36 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     revived by a late remittance emits exactly one terminal event, so the
     backlog never double-counts.
 
+23. **Computed time: durations are data, not executed waits** (experiment
+    branch; supersedes the runtime constraint in #12). Every duration a task
+    used to sleep is now declared and compared: a `Submission` carries
+    `sent_at`; the sim answers with a `Transaction` — every delivery that
+    attempt will ever produce, with computed virtual arrival times (an empty
+    transaction IS the drop faults: silence, unexplained). The claim task
+    keeps a local clock and a min-heap of declared arrivals; the
+    `select!(response, deadline)` race becomes `min(next_arrival, deadline)`
+    — the same decision, as arithmetic. `machine::next` is untouched: it
+    never knew where `now` came from. Consequences: `start_paused` and the
+    current-thread constraint disappear, claim tasks execute in true
+    parallel on the stock scheduler, and determinism *strengthens* — the
+    full finalized event log is identical across runs at any worker count
+    (pinned by test). The clearinghouse becomes a sync `Transactor` call
+    (trait in `domain`, so `sim`/`biller` still never import each other)
+    executing on the calling task's thread; the dispatcher shrinks to a
+    quarantine clerk; the fold no longer assumes a time-sorted stream —
+    `finalize` restores order by (at, claim_id, arrival-index) and rebuilds
+    the intake snapshot as a per-claim replay. The biller still reads its
+    inbox only when listening (arrivals during a backoff sleep are processed
+    at wake, `now = max(arrival, now)`), which keeps the executed semantics
+    byte-for-byte: old and new binaries produce identical reports on the
+    same seed. The trade honestly named: the timeout is now an explicit
+    comparison rather than an executed race — "silence is the failure"
+    lives in a formula instead of a sleeping task. FENCE: this parallelism
+    rests entirely on claim independence and pre-seeded nondeterminism; any
+    future cross-claim coupling (payer rate limits, shared queues,
+    load-dependent latency) breaks the declared-duration model and returns
+    us to parallel-DES territory.
+
 ## Module layout
 
 ```

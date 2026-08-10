@@ -120,6 +120,21 @@ struct Cli {
     /// stdout is not a terminal).
     #[arg(long, help_heading = "Output")]
     no_tui: bool,
+
+    /// Worker threads for the simulation runtime (0 = one per CPU core).
+    /// Time is computed, not slept, so claim tasks parallelize freely.
+    #[arg(long, default_value_t = 0, help_heading = "Simulation")]
+    threads: usize,
+}
+
+/// Multi-thread tokio runtime for the simulation (Decisions #23: nothing
+/// sleeps, so no paused clock — claim tasks execute in true parallel).
+fn sim_runtime(threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if threads > 0 {
+        builder.worker_threads(threads);
+    }
+    builder.enable_all().build()
 }
 
 fn main() -> anyhow::Result<()> {
@@ -160,6 +175,7 @@ fn main() -> anyhow::Result<()> {
             tui::TuiOptions {
                 banner,
                 seed: cli.seed,
+                threads: cli.threads,
             },
         )?;
         // Leave a plain-text record in the scrollback after the UI closes.
@@ -171,12 +187,7 @@ fn main() -> anyhow::Result<()> {
 
     print_banner(&cli, &cfg, &provenance, &style);
 
-    // Virtual time: paused clock + auto-advance needs a current-thread
-    // runtime (DESIGN.md Decisions #12). The sim runs as fast as compute allows.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .start_paused(true)
-        .build()?;
+    let runtime = sim_runtime(cli.threads)?;
     let wall_start = std::time::Instant::now();
     let output = runtime.block_on(async {
         let mut cfg = cfg;
@@ -192,7 +203,14 @@ fn main() -> anyhow::Result<()> {
     })?;
     let wall = wall_start.elapsed();
 
+    let t_reports = std::time::Instant::now();
     print_reports(&cli, &output, Some(wall), &style);
+    if std::env::var_os("SIM_PHASES").is_some() {
+        eprintln!(
+            "SIM_PHASES reports={:.2}s",
+            t_reports.elapsed().as_secs_f64()
+        );
+    }
     Ok(())
 }
 
