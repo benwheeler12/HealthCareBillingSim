@@ -36,6 +36,8 @@ pub struct TuiOptions {
     /// Pre-rendered run-configuration banner (uncolored).
     pub banner: String,
     pub seed: u64,
+    /// Worker threads for the sim runtime (0 = one per core).
+    pub threads: usize,
 }
 
 /// Run the simulation under the interactive UI and hand the finished output
@@ -44,10 +46,16 @@ pub fn run(mut cfg: RunConfig, opts: TuiOptions) -> anyhow::Result<RunOutput> {
     let (progress_tx, progress_rx) = watch::channel(Progress::default());
     cfg.progress = Some(progress_tx);
     let (done_tx, done_rx) = mpsc::channel();
+    let threads = opts.threads;
     let sim = std::thread::spawn(move || {
-        let result = tokio::runtime::Builder::new_current_thread()
+        // Multi-thread runtime (Decisions #23): nothing sleeps, so no paused
+        // clock — claim tasks execute in true parallel under the UI.
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        if threads > 0 {
+            builder.worker_threads(threads);
+        }
+        let result = builder
             .enable_all()
-            .start_paused(true)
             .build()
             .map_err(anyhow::Error::from)
             .and_then(|rt| rt.block_on(healthcare_billing_sim::run(cfg)));

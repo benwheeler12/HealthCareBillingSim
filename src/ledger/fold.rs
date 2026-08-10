@@ -2,9 +2,6 @@
 //! runtime monitoring, raw log for replay and audit. `apply` is pure state
 //! transition — the async fn is only the channel shell.
 
-use std::sync::Arc;
-use std::sync::OnceLock;
-
 use tokio::sync::{mpsc, watch};
 
 use crate::domain::{RemittanceAdvice, VirtualTime};
@@ -26,42 +23,37 @@ pub struct Progress {
     pub now: VirtualTime,
 }
 
-/// Single consumer of the ledger channel. Returns the final ledger when every
-/// sender has been dropped — which, by shutdown design, means every claim has
-/// reached a terminal state. When a watch sender is supplied, counters are
-/// published every few events (and once at the end).
-/// The fold returns both views: the final books (every claim terminal) and
-/// the books frozen at the moment intake ended. A/R reports are a mid-flight
-/// snapshot by nature — driving everything terminal first would empty every
-/// young bucket by construction — so aging/chase report over the snapshot
-/// while the terminal guarantee is asserted on the final ledger.
+/// Both views of the books: final (every claim terminal — the correctness
+/// guarantee) and frozen at the moment intake ended. A/R reports are a
+/// mid-flight snapshot by nature — driving everything terminal first would
+/// empty every young bucket by construction — so aging/chase report over the
+/// snapshot while the terminal guarantee is asserted on the final ledger.
 pub struct FoldOutput {
     pub ledger: Ledger,
     pub intake_snapshot: Ledger,
 }
 
+/// Single consumer of the ledger channel. Returns the final ledger when every
+/// sender has been dropped — which, by shutdown design, means every claim has
+/// reached a terminal state. When a watch sender is supplied, counters are
+/// published every few events (and once at the end).
+///
+/// Under computed time (Decisions #23) the merged stream is NOT virtual-time
+/// sorted — parallel claim tasks emit in wall completion order, so a claim
+/// finished at virtual day 200 can land before another's day-10 event.
+/// Per-claim causal order still holds (each claim emits through one FIFO
+/// sender), which is all `apply` needs; global ordering and the intake
+/// snapshot are restored in [`finalize`]. Progress `now` is therefore a
+/// frontier — the max timestamp seen — not a clock.
 pub async fn run_fold(
     mut rx: mpsc::Receiver<StampedEvent>,
     progress: Option<watch::Sender<Progress>>,
-    intake_done: Arc<OnceLock<VirtualTime>>,
-) -> FoldOutput {
+) -> Ledger {
     let mut ledger = Ledger::default();
-    let mut snapshot: Option<Ledger> = None;
+    let mut frontier = VirtualTime::default();
     let mut events: usize = 0;
     while let Some(event) = rx.recv().await {
-        let at = event.at;
-        // Freeze the books the first time an event lands strictly past
-        // intake-end: events stamped AT the mark are the final intake
-        // instant's own (the last Ingested rows land at exactly that stamp)
-        // and belong inside the snapshot. run() sets the marker synchronously
-        // before time can advance past it, so nothing later-stamped can be
-        // queued ahead of it. (Match form, not a let-chain: rustc 1.85.)
-        if snapshot.is_none() {
-            match intake_done.get() {
-                Some(mark) if at > *mark => snapshot = Some(ledger.clone()),
-                _ => {}
-            }
-        }
+        frontier = frontier.max(event.at);
         ledger.apply(event);
         events += 1;
         // `% 32` rather than `is_multiple_of` (rustc 1.87+), and a match
@@ -69,16 +61,35 @@ pub async fn run_fold(
         #[allow(clippy::manual_is_multiple_of)]
         match &progress {
             Some(tx) if events % 32 == 0 => {
-                let _ = tx.send(ledger.progress(at));
+                let _ = tx.send(ledger.progress(frontier));
             }
             _ => {}
         }
     }
     if let Some(tx) = &progress {
-        let last = ledger.event_log.last().map(|e| e.at).unwrap_or_default();
-        let _ = tx.send(ledger.progress(last));
+        let _ = tx.send(ledger.progress(frontier));
     }
-    let intake_snapshot = snapshot.unwrap_or_else(|| ledger.clone());
+    ledger
+}
+
+/// Restore virtual-time order and take the intake-end snapshot, the
+/// event-sourcing way: sort the retained log by (at, claim_id) — stable, so
+/// each claim's causal order survives ties, and cross-claim ties are broken
+/// deterministically — then the snapshot is a *replay* of every event
+/// stamped at or before the intake mark. Events AT the mark are the final
+/// intake instant's own (the last Ingested rows land exactly there) and
+/// belong inside.
+pub fn finalize(mut ledger: Ledger, intake_mark: VirtualTime) -> FoldOutput {
+    ledger
+        .event_log
+        .sort_by(|a, b| (a.at, &a.claim_id.0).cmp(&(b.at, &b.claim_id.0)));
+    let mut intake_snapshot = Ledger::default();
+    for event in &ledger.event_log {
+        if event.at > intake_mark {
+            break;
+        }
+        intake_snapshot.apply(event.clone());
+    }
     FoldOutput {
         ledger,
         intake_snapshot,

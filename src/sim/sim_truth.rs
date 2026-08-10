@@ -61,9 +61,11 @@ impl SimTruth {
 }
 
 /// Single consumer of the fault channel; returns when every injector has
-/// dropped its sender (structurally: when the clearinghouse and all payer
-/// tasks are done).
-pub async fn run_recorder(mut rx: mpsc::Receiver<InjectedFault>) -> SimTruth {
+/// dropped its sender (structurally: when the clearinghouse handle is gone).
+/// Unbounded because `Clearinghouse::transact` is a sync call on the biller's
+/// thread (Decisions #23) — recording must not block, and fault volume is
+/// bounded by the fault table itself.
+pub async fn run_recorder(mut rx: mpsc::UnboundedReceiver<InjectedFault>) -> SimTruth {
     let mut truth = SimTruth::default();
     while let Some(fault) = rx.recv().await {
         tracing::debug!(claim_id = %fault.claim_id, attempt = fault.attempt,

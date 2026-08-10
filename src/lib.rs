@@ -12,7 +12,7 @@ pub mod sim;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -20,11 +20,11 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::biller::claim_task::{ClaimTaskDeps, run_claim};
-use crate::biller::dispatcher::run_dispatcher;
+use crate::biller::dispatcher::run_quarantine;
 use crate::biller::policy::RetryPolicy;
-use crate::domain::{Claim, ClaimId, Clock, PayerId, VirtualTime, validation};
+use crate::domain::{Claim, ClaimId, PayerId, VirtualTime, validation};
 use crate::ledger::events::{ClaimEvent, LedgerTx};
-use crate::ledger::fold::{FoldOutput, Progress, run_fold};
+use crate::ledger::fold::{FoldOutput, Progress, finalize, run_fold};
 use crate::ledger::records::{ClaimIdentity, Ledger, LineRecord};
 use crate::sim::clearinghouse::Clearinghouse;
 use crate::sim::faults::FaultProfile;
@@ -81,28 +81,20 @@ pub struct RunOutput {
 
 /// Run the whole simulation to completion.
 ///
-/// Must run inside a current-thread runtime with `start_paused(true)`
-/// (Decisions #12). Shutdown is structural: input exhausted + claim-task
-/// JoinSet drained ⇒ channels close in dependency order ⇒ the ledger fold
-/// returns ⇒ done. No shutdown signals anywhere.
+/// Time is computed, never slept (Decisions #23), so this runs on any tokio
+/// runtime — the multi-thread scheduler by default, where claim tasks
+/// genuinely execute in parallel. Shutdown is structural: input exhausted +
+/// claim-task JoinSet drained ⇒ channels close in dependency order ⇒ the
+/// ledger fold returns ⇒ done. No shutdown signals anywhere.
 pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
-    let clock = Clock::start();
-
     let (ledger_tx, ledger_rx) = mpsc::channel(1024);
-    let (submission_tx, submission_rx) = mpsc::channel(256);
-    let (remit_tx, remit_rx) = mpsc::channel(256);
-    let (dispatcher_tx, dispatcher_rx) = mpsc::channel(256);
-    let (sim_truth_tx, sim_truth_rx) = mpsc::channel(256);
-    let ledger_tx = LedgerTx::new(ledger_tx, clock.clone());
+    let (strays_tx, strays_rx) = mpsc::channel(256);
+    let (sim_truth_tx, sim_truth_rx) = mpsc::unbounded_channel();
+    let ledger_tx = LedgerTx::new(ledger_tx);
 
-    let intake_done: Arc<OnceLock<VirtualTime>> = Arc::new(OnceLock::new());
-    let fold = tokio::spawn(run_fold(
-        ledger_rx,
-        cfg.progress.take(),
-        intake_done.clone(),
-    ));
+    let fold = tokio::spawn(run_fold(ledger_rx, cfg.progress.take()));
     let recorder = tokio::spawn(run_recorder(sim_truth_rx));
-    let dispatcher = tokio::spawn(run_dispatcher(dispatcher_rx, remit_rx, ledger_tx.clone()));
+    let clerk = tokio::spawn(run_quarantine(strays_rx, ledger_tx.clone()));
     let resolved_faults = cfg
         .payers
         .keys()
@@ -111,40 +103,43 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
             (*payer, profile)
         })
         .collect();
-    let clearinghouse = Clearinghouse {
+    let clearinghouse = Arc::new(Clearinghouse {
         payers: cfg.payers.clone(),
         rng: RngFactory::new(cfg.seed),
         faults: resolved_faults,
         sim_truth: sim_truth_tx,
-    };
-    let clearinghouse = tokio::spawn(clearinghouse.run(submission_rx, remit_tx));
+    });
 
     let deps = ClaimTaskDeps {
         policy: cfg.policy,
-        clock,
         ledger: ledger_tx.clone(),
-        clearinghouse_tx: submission_tx,
-        dispatcher_tx,
+        clearinghouse,
+        strays_tx,
     };
-    let clock_for_reports = deps.clock.clone();
-    let mut claim_tasks = ingest(&cfg, &ledger_tx, &deps).await?;
-    drop(deps);
-    // Set synchronously before any further await: virtual time cannot have
-    // advanced past this instant, so the fold's snapshot check is race-free.
-    let intake_finished_at = clock_for_reports.now();
-    let _ = intake_done.set(intake_finished_at);
+    let (mut claim_tasks, intake_finished_at) = ingest(&cfg, &ledger_tx, &deps).await?;
+    drop(deps); // releases our strays_tx + clearinghouse handles
 
     while let Some(joined) = claim_tasks.join_next().await {
         joined.context("claim task panicked")?;
     }
-    clearinghouse.await.context("clearinghouse panicked")?;
-    dispatcher.await.context("dispatcher panicked")?;
+    // Every claim task is done ⇒ every strays sender is dropped ⇒ the clerk
+    // drains and exits; it holds a ledger sender, so it must finish before
+    // the fold can.
+    clerk.await.context("quarantine clerk panicked")?;
     drop(ledger_tx);
+    let ledger = fold.await.context("ledger fold panicked")?;
+    let sim_truth = recorder.await.context("sim-truth recorder panicked")?;
+
+    let finished_at = ledger
+        .event_log
+        .iter()
+        .map(|e| e.at)
+        .max()
+        .unwrap_or_default();
     let FoldOutput {
         ledger,
         intake_snapshot,
-    } = fold.await.context("ledger fold panicked")?;
-    let sim_truth = recorder.await.context("sim-truth recorder panicked")?;
+    } = finalize(ledger, intake_finished_at);
 
     tracing::info!(
         claims = ledger.claims.len(),
@@ -156,18 +151,20 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
         intake_ledger: intake_snapshot,
         sim_truth,
         intake_finished_at,
-        finished_at: clock_for_reports.now(),
+        finished_at,
     })
 }
 
-/// Read the input file at the configured rate, validate each line, and spawn
-/// one claim task per valid claim. Malformed lines become Rejected ledger
-/// rows — never silent drops.
+/// Read the input file, validate each line, and spawn one claim task per
+/// valid claim. Malformed lines become Rejected ledger rows — never silent
+/// drops. The configured rate assigns each line its computed arrival time —
+/// line i lands at i × (1/rate), exactly where the rate-limited sleep loop
+/// used to put it — and returns the last arrival as the intake-end mark.
 async fn ingest(
     cfg: &RunConfig,
     ledger: &LedgerTx,
     deps: &ClaimTaskDeps,
-) -> anyhow::Result<JoinSet<()>> {
+) -> anyhow::Result<(JoinSet<()>, VirtualTime)> {
     let file = std::fs::File::open(&cfg.input_path)
         .with_context(|| format!("opening {}", cfg.input_path.display()))?;
     let reader = std::io::BufReader::new(file);
@@ -175,17 +172,22 @@ async fn ingest(
 
     let mut tasks = JoinSet::new();
     let mut seen = std::collections::HashSet::new();
+    let mut arrival = VirtualTime::default();
     for (line_no, line) in reader.lines().enumerate() {
         let line = line.context("reading input")?;
         let line_no = line_no + 1; // 1-based for humans
-        tokio::time::sleep(interval).await;
+        arrival = arrival + interval;
         match validation::validate_line(&line) {
             // Fault 1.3: a claim_id we've already ingested. First document
             // wins; the dup becomes a history event, never a resubmission.
             Ok(claim) if seen.contains(&claim.claim_id) => {
                 tracing::debug!(claim_id = %claim.claim_id, line_no, "duplicate claim_id in input");
                 ledger
-                    .emit(claim.claim_id, ClaimEvent::DuplicateIngest { line_no })
+                    .emit(
+                        arrival,
+                        claim.claim_id,
+                        ClaimEvent::DuplicateIngest { line_no },
+                    )
                     .await;
             }
             // Fault 1.4: schema-valid but nothing billable. Policy: resolved
@@ -194,28 +196,32 @@ async fn ingest(
                 tracing::debug!(claim_id = %claim.claim_id, "no billable lines; trivially resolved");
                 seen.insert(claim.claim_id.clone());
                 ledger
-                    .emit(claim.claim_id.clone(), ingested_event(&claim))
+                    .emit(arrival, claim.claim_id.clone(), ingested_event(&claim))
                     .await;
-                ledger.emit(claim.claim_id, ClaimEvent::Resolved).await;
+                ledger
+                    .emit(arrival, claim.claim_id, ClaimEvent::Resolved)
+                    .await;
             }
             Ok(claim) => {
                 tracing::debug!(claim_id = %claim.claim_id, payer = %claim.payer_id, "claim ingested");
                 seen.insert(claim.claim_id.clone());
                 ledger
-                    .emit(claim.claim_id.clone(), ingested_event(&claim))
+                    .emit(arrival, claim.claim_id.clone(), ingested_event(&claim))
                     .await;
-                tasks.spawn(run_claim(claim, deps.clone()));
+                tasks.spawn(run_claim(claim, arrival, deps.clone()));
             }
             Err((claim_id, reason)) => {
                 let claim_id =
                     claim_id.unwrap_or_else(|| ClaimId(format!("<unparseable-line-{line_no}>")));
                 tracing::debug!(%claim_id, ?reason, "claim rejected at ingest");
                 seen.insert(claim_id.clone());
-                ledger.emit(claim_id, ClaimEvent::Rejected { reason }).await;
+                ledger
+                    .emit(arrival, claim_id, ClaimEvent::Rejected { reason })
+                    .await;
             }
         }
     }
-    Ok(tasks)
+    Ok((tasks, arrival))
 }
 
 fn ingested_event(claim: &Claim) -> ClaimEvent {

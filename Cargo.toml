@@ -12,9 +12,9 @@ rand = "0.9"
 rand_chacha = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `test-util` is required in the main dependency set: the simulation binary itself
-# runs under a paused-clock runtime (Builder::start_paused), not just the tests.
-tokio = { version = "1", features = ["rt", "macros", "time", "sync", "test-util"] }
+# Multi-thread runtime: time is computed, not slept (Decisions #23), so the
+# simulation runs on the stock scheduler with claim tasks in true parallel.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "test-util"] }
 ratatui = "0.29"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

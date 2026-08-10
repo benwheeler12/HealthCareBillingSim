@@ -4,7 +4,7 @@
 
 use tokio::sync::mpsc;
 
-use crate::domain::{ClaimId, Clock, RemittanceAdvice, ValidationError, VirtualTime};
+use crate::domain::{ClaimId, RemittanceAdvice, ValidationError, VirtualTime};
 use crate::ledger::records::{Adjudication, ClaimIdentity, FlagReason, LineRecord};
 
 #[derive(Clone, Debug)]
@@ -53,26 +53,22 @@ pub struct StampedEvent {
     pub event: ClaimEvent,
 }
 
-/// Sender half of the ledger channel, paired with the clock so events are
-/// stamped at emission, not at fold.
+/// Sender half of the ledger channel. The caller owns time (Decisions #23):
+/// every emission carries the emitting claim's computed virtual timestamp —
+/// there is no clock to read.
 #[derive(Clone)]
 pub struct LedgerTx {
     tx: mpsc::Sender<StampedEvent>,
-    clock: Clock,
 }
 
 impl LedgerTx {
-    pub fn new(tx: mpsc::Sender<StampedEvent>, clock: Clock) -> LedgerTx {
-        LedgerTx { tx, clock }
+    pub fn new(tx: mpsc::Sender<StampedEvent>) -> LedgerTx {
+        LedgerTx { tx }
     }
 
-    pub fn now(&self) -> VirtualTime {
-        self.clock.now()
-    }
-
-    pub async fn emit(&self, claim_id: ClaimId, event: ClaimEvent) {
+    pub async fn emit(&self, at: VirtualTime, claim_id: ClaimId, event: ClaimEvent) {
         let stamped = StampedEvent {
-            at: self.clock.now(),
+            at,
             claim_id,
             event,
         };

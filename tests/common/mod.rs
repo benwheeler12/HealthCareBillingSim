@@ -1,5 +1,5 @@
 //! Shared helpers for integration tests: claim-document builders, input-file
-//! writing, and paused-runtime execution. Each test crate uses the subset it
+//! writing, and simulation execution. Each test crate uses the subset it
 //! needs.
 #![allow(dead_code)]
 
@@ -59,11 +59,12 @@ pub fn write_input(name: &str, lines: &[String]) -> PathBuf {
     path
 }
 
-/// Run a fully-specified config to completion on a fresh paused runtime.
+/// Run a fully-specified config to completion on a fresh multi-thread
+/// runtime — the same scheduler the binary uses (Decisions #23): claim tasks
+/// really do execute in parallel under the tests.
 pub fn run_sim_with(cfg: RunConfig) -> RunOutput {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .start_paused(true)
         .build()
         .expect("runtime");
     runtime.block_on(run(cfg)).expect("run")
