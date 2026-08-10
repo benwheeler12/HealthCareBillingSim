@@ -123,14 +123,20 @@ input file ──▶ ingest (validate, rate-limit, dedup)
 
 ## Virtual time
 
-All delays and timeouts run on tokio's paused clock with auto-advance: time
-jumps straight to the next armed timer whenever every task is parked, so a
-115-virtual-day run finishes in ~300ms of wall time. Timeouts are **not
-messages** — silence is the failure. Latency is a payer property, the timeout
-is a biller policy, and a "timeout fault" only ever *emerges* from their
-interaction. The load-bearing assumptions (ms wall time, exact
-next-timer advance, cross-run determinism) are pinned by
-`tests/virtual_time.rs`, the build-step-1 spike kept as a permanent proof.
+Time is **computed, not slept** (Decisions #23): durations cross the
+biller ↔ sim boundary as data. A submission declares when it was sent; the
+sim answers with every delivery that attempt will ever produce, stamped with
+computed virtual arrival times — an empty answer IS the drop faults. The
+claim task compares its next declared arrival against its deadline: the
+same decision the old `select!`-vs-`sleep_until` race made, as arithmetic.
+Timeouts are still **not messages** — silence is the absence of arrivals,
+the biller is never told which hop failed. Latency is a payer property, the
+timeout is a biller policy, and a "timeout fault" only ever *emerges* from
+their comparison. Because nothing sleeps, the sim runs on the stock
+multi-thread scheduler — claim tasks execute in true parallel (`--threads`
+controls the worker count) — and the full finalized event log is identical
+across runs at any thread count, pinned by
+`tests/invariants.rs::full_event_log_is_identical_across_parallel_runs`.
 
 ## Determinism
 

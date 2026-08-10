@@ -73,23 +73,66 @@ pub async fn run_fold(
 }
 
 /// Restore virtual-time order and take the intake-end snapshot, the
-/// event-sourcing way: sort the retained log by (at, claim_id) — stable, so
-/// each claim's causal order survives ties, and cross-claim ties are broken
-/// deterministically — then the snapshot is a *replay* of every event
-/// stamped at or before the intake mark. Events AT the mark are the final
-/// intake instant's own (the last Ingested rows land exactly there) and
-/// belong inside.
+/// event-sourcing way — in parallel, since both halves decompose:
+///
+/// - The log sort is an index argsort (rayon): key (at, claim_id, original
+///   index) is a total order, so an unstable parallel sort reproduces the
+///   stable sort exactly — original index preserves each claim's causal
+///   order across identical timestamps — followed by one permutation pass
+///   that moves each fat event once.
+/// - The snapshot is a per-claim replay of that claim's own history up to
+///   the mark. Claims are independent (the property the whole experiment
+///   rests on), so the rebuild is embarrassingly parallel. Events AT the
+///   mark are the final intake instant's own (the last Ingested rows land
+///   exactly there) and belong inside.
 pub fn finalize(mut ledger: Ledger, intake_mark: VirtualTime) -> FoldOutput {
-    ledger
-        .event_log
-        .sort_by(|a, b| (a.at, &a.claim_id.0).cmp(&(b.at, &b.claim_id.0)));
-    let mut intake_snapshot = Ledger::default();
-    for event in &ledger.event_log {
-        if event.at > intake_mark {
-            break;
-        }
-        intake_snapshot.apply(event.clone());
-    }
+    use rayon::prelude::*;
+
+    let log = std::mem::take(&mut ledger.event_log);
+    let mut order: Vec<u32> = (0..log.len() as u32).collect();
+    order.par_sort_unstable_by(|&a, &b| {
+        let (ea, eb) = (&log[a as usize], &log[b as usize]);
+        (ea.at, &ea.claim_id.0, a).cmp(&(eb.at, &eb.claim_id.0, b))
+    });
+    let mut slots: Vec<Option<StampedEvent>> = log.into_iter().map(Some).collect();
+    ledger.event_log = order
+        .into_iter()
+        .map(|i| {
+            slots[i as usize]
+                .take()
+                .expect("permutation is a bijection")
+        })
+        .collect();
+
+    let claims = ledger
+        .claims
+        .par_iter()
+        .map(|(claim_id, record)| {
+            // Replay this claim's history through the same `apply` the live
+            // fold uses — correctness by construction, one claim at a time.
+            let mut mini = Ledger::default();
+            for event in record.history.iter().filter(|e| e.at <= intake_mark) {
+                mini.apply(event.clone());
+            }
+            let rebuilt = mini
+                .claims
+                .remove(claim_id)
+                .expect("every claim is ingested at or before the intake mark");
+            (claim_id.clone(), rebuilt)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
+    let intake_snapshot = Ledger {
+        claims,
+        quarantine: ledger
+            .quarantine
+            .iter()
+            .filter(|e| e.at <= intake_mark)
+            .cloned()
+            .collect(),
+        event_log: Vec::new(),
+    };
     FoldOutput {
         ledger,
         intake_snapshot,

@@ -203,7 +203,14 @@ fn main() -> anyhow::Result<()> {
     })?;
     let wall = wall_start.elapsed();
 
+    let t_reports = std::time::Instant::now();
     print_reports(&cli, &output, Some(wall), &style);
+    if std::env::var_os("SIM_PHASES").is_some() {
+        eprintln!(
+            "SIM_PHASES reports={:.2}s",
+            t_reports.elapsed().as_secs_f64()
+        );
+    }
     Ok(())
 }
 

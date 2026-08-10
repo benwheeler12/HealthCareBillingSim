@@ -3,8 +3,8 @@
 //! and Enter on the chase list drilling into a claim's full audit trail.
 //!
 //! Threading: the TUI event loop owns the main thread on the *wall* clock;
-//! the simulation runs on a worker thread inside its own paused-time runtime
-//! (Decisions #12 — auto-advance needs a dedicated current-thread runtime).
+//! the simulation runs on its own multi-thread runtime behind a spawned
+//! thread (Decisions #23 — time is computed, so claim tasks parallelize).
 //! They meet at two channels: the fold's live-progress watch tap, and a
 //! oneshot carrying the finished `RunOutput`.
 
