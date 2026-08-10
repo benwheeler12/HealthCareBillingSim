@@ -17,15 +17,15 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::symbols::Marker;
 use ratatui::text::Line;
 use ratatui::widgets::{
-    Axis, Block, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table, TableState, Tabs,
+    Axis, Block, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 use tokio::sync::watch;
 
 use healthcare_billing_sim::domain::{Money, VirtualTime, human_virtual};
 use healthcare_billing_sim::ledger::events::{ClaimEvent, StampedEvent};
 use healthcare_billing_sim::ledger::fold::Progress;
-use healthcare_billing_sim::ledger::records::ClaimState;
-use healthcare_billing_sim::reports::chase::ChaseItem;
+use healthcare_billing_sim::ledger::records::{ClaimRecord, ClaimState, FlagReason};
+use healthcare_billing_sim::reports::chase::{ChaseItem, status_label};
 use healthcare_billing_sim::reports::{
     Denials, Scorecard, ar_aging, chase_list, days_in_ar, denial_breakdown, diagnostic,
     payer_scorecard, summarize,
@@ -901,11 +901,13 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, detail: &str) {
         height,
     };
     frame.render_widget(Clear, popup);
-    let body = Paragraph::new(detail.to_string()).block(
-        Block::bordered()
-            .title(" claim audit trail — esc to close ")
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
+    let body = Paragraph::new(detail.to_string())
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::bordered()
+                .title(" claim audit trail — esc to close ")
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
     frame.render_widget(body, popup);
 }
 
@@ -948,11 +950,9 @@ fn claim_detail(output: &RunOutput, claim_id: &str) -> String {
     let Some(record) = output.ledger.claims.get(&key) else {
         return format!("claim {claim_id} not found");
     };
-    let snapshot_state = output
-        .intake_ledger
-        .claims
-        .get(&key)
-        .map(|r| state_label(&r.state))
+    let snapshot = output.intake_ledger.claims.get(&key);
+    let snapshot_state = snapshot
+        .map(state_label)
         .unwrap_or_else(|| "not yet ingested".to_string());
 
     let mut out = String::new();
@@ -965,11 +965,22 @@ fn claim_detail(output: &RunOutput, claim_id: &str) -> String {
     }
     out.push_str(&format!(
         "at intake snapshot: {snapshot_state}\nfinal state:        {} · {} attempts\n",
-        state_label(&record.state),
+        state_label(record),
         record.attempts
     ));
+    out.push_str("\nwhat this means:\n");
+    match snapshot.filter(|s| s.state != record.state) {
+        Some(snap) => out.push_str(&format!(
+            "• at the A/R snapshot — {}: {}\n• by the end of the run — {}: {}\n",
+            status_label(snap),
+            state_explanation(snap),
+            status_label(record),
+            state_explanation(record),
+        )),
+        None => out.push_str(&format!("{}\n", state_explanation(record))),
+    }
     out.push_str(&format!(
-        "outstanding {} of {} billed\n\nservice lines:\n",
+        "\noutstanding {} of {} billed\n\nservice lines:\n",
         record.payer_outstanding(),
         record.lines.iter().map(|l| l.billed()).sum::<Money>()
     ));
@@ -1003,15 +1014,88 @@ fn claim_detail(output: &RunOutput, claim_id: &str) -> String {
     out
 }
 
-fn state_label(state: &ClaimState) -> String {
-    match state {
-        ClaimState::Pending => "pending".into(),
+/// The chase list's plain-English status, with the armed deadline appended
+/// while the claim is still waiting.
+fn state_label(record: &ClaimRecord) -> String {
+    match &record.state {
         ClaimState::AwaitingResponse { timeout_at } => {
-            format!("awaiting response (deadline {timeout_at})")
+            format!("{} (deadline {timeout_at})", status_label(record))
         }
-        ClaimState::Resolved => "resolved".into(),
-        ClaimState::Rejected { .. } => "rejected at ingest".into(),
-        ClaimState::Flagged { reason } => format!("flagged: {reason:?}"),
+        _ => status_label(record),
+    }
+}
+
+/// What the state means in this simulation, in operator language — the
+/// claim-detail overlay's decoder ring for the status column.
+fn state_explanation(record: &ClaimRecord) -> String {
+    let answered = record
+        .lines
+        .iter()
+        .any(|l| !l.do_not_bill && l.adjudication.is_some());
+    match &record.state {
+        ClaimState::Pending => "ingested but not yet submitted — claims spend only \
+            milliseconds here between the ingest event and the first submission."
+            .into(),
+        ClaimState::AwaitingResponse { .. } if answered => "a remittance arrived, but some \
+            service lines were missing — lost on the way back from the payer. The lines that \
+            made it are balanced and booked; the unanswered ones keep the claim open and \
+            aging. At the deadline the biller resubmits, and the payer's re-derived answer \
+            can fill in the gaps."
+            .into(),
+        ClaimState::AwaitingResponse { .. } if record.attempts > 1 => "an earlier submission \
+            went unanswered past its follow-up deadline, so the biller sent the claim again. \
+            All silence looks the same from here: the claim may have been dropped on the way \
+            to the payer, the answer dropped or delayed on the way back, or the payer may \
+            simply be slow. Resubmitting is safe — a payer that already adjudicated re-issues \
+            the identical remittance."
+            .into(),
+        ClaimState::AwaitingResponse { .. } => "submitted to the payer through the \
+            clearinghouse; no answer yet, and the follow-up deadline hasn't passed. The \
+            biller cannot tell a slow payer from a dropped claim or a lost answer — silence \
+            is all it sees. If the deadline passes it resubmits, a bounded number of times."
+            .into(),
+        ClaimState::Resolved => "every billable line has an adjudication and the books \
+            balance to the cent — payer paid + patient responsibility + not allowed exactly \
+            equals what was billed. Nothing left outstanding."
+            .into(),
+        ClaimState::Rejected { .. } => "failed validation at ingest (bad JSON, schema \
+            violation, or billing policy) and was never submitted to any payer. Kept as a \
+            ledger row so no input line is silently dropped."
+            .into(),
+        ClaimState::Flagged {
+            reason: FlagReason::RetriesExhausted,
+        } => format!(
+            "the biller submitted this claim {} times — its whole retry budget — and every \
+            deadline passed in silence: on each attempt the claim or its answer was dropped \
+            (or delayed past the timeout) in transit. Unlike a claim still awaiting or \
+            retrying, the biller has stopped chasing: the claim is parked for human \
+            follow-up and its unanswered billed amount stays in A/R. A remittance that \
+            straggles in later can still flip it to resolved.",
+            record.attempts
+        ),
+        ClaimState::Flagged {
+            reason: FlagReason::ReconciliationFailed { billed, accounted },
+        } => {
+            let delta = if accounted < billed {
+                format!("short by {}", *billed - *accounted)
+            } else {
+                format!("over by {}", *accounted - *billed)
+            };
+            format!(
+                "the payer answered, but the money doesn't add up. Every line must satisfy \
+                billed = payer paid + patient responsibility (copay/coinsurance/deductible) \
+                + not allowed, exactly, in cents. Here the payer accounted for {accounted} \
+                against {billed} billed ({delta}) — the simulation's dishonest-payer fault. \
+                The biller refuses to book figures that don't reconcile, so the disputed \
+                amount stays outstanding for a human to take up with the payer."
+            )
+        }
+        ClaimState::Flagged {
+            reason: FlagReason::MalformedRemittance,
+        } => "a remittance correlated to this claim but referenced service lines the claim \
+            doesn't have (or repeated one) — not usable as an answer, so the claim is parked \
+            for human review."
+            .into(),
     }
 }
 

@@ -7,7 +7,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::domain::{ClaimId, Money, PayerId, VirtualTime};
-use crate::ledger::records::{ClaimState, Ledger};
+use crate::ledger::records::{ClaimRecord, ClaimState, FlagReason, Ledger};
 
 pub struct ChaseItem {
     pub claim_id: ClaimId,
@@ -43,7 +43,7 @@ pub fn chase_list(ledger: &Ledger, now: VirtualTime, limit: usize) -> Vec<ChaseI
                 outstanding: r.payer_outstanding(),
                 age: r.age(now).unwrap_or_default(),
                 attempts: r.attempts,
-                status: status_label(&r.state),
+                status: status_label(r),
             })
         })
         .collect();
@@ -57,13 +57,43 @@ pub fn chase_list(ledger: &Ledger, now: VirtualTime, limit: usize) -> Vec<ChaseI
     items
 }
 
-fn status_label(state: &ClaimState) -> String {
-    match state {
-        ClaimState::Pending => "pending".into(),
-        ClaimState::AwaitingResponse { .. } => "awaiting response".into(),
+/// Plain-English status, derived from the whole record — the state alone
+/// says "awaiting response", but the record's attempt count and answered
+/// lines tell the operator *which kind* of waiting this is.
+pub fn status_label(record: &ClaimRecord) -> String {
+    let billable = record.lines.iter().filter(|l| !l.do_not_bill).count();
+    let answered = record
+        .lines
+        .iter()
+        .filter(|l| !l.do_not_bill && l.adjudication.is_some())
+        .count();
+    match &record.state {
+        ClaimState::Pending => "pending submission".into(),
+        ClaimState::AwaitingResponse { .. } if answered > 0 => {
+            format!("partial remit ({answered}/{billable} lines)")
+        }
+        ClaimState::AwaitingResponse { .. } if record.attempts > 1 => {
+            format!("retrying (attempt {})", record.attempts)
+        }
+        ClaimState::AwaitingResponse { .. } => "awaiting 1st response".into(),
         ClaimState::Resolved => "resolved".into(),
-        ClaimState::Rejected { .. } => "rejected".into(),
-        ClaimState::Flagged { reason } => format!("flagged: {reason:?}"),
+        ClaimState::Rejected { .. } => "rejected at ingest".into(),
+        ClaimState::Flagged { reason } => format!("flagged: {}", flag_label(reason)),
+    }
+}
+
+/// The flag's cause in operator language, with the money delta where the
+/// reason carries one.
+pub fn flag_label(reason: &FlagReason) -> String {
+    match reason {
+        FlagReason::RetriesExhausted => "no response, gave up".into(),
+        FlagReason::ReconciliationFailed { billed, accounted } if accounted < billed => {
+            format!("doesn't sum (short {})", *billed - *accounted)
+        }
+        FlagReason::ReconciliationFailed { billed, accounted } => {
+            format!("doesn't sum (over {})", *accounted - *billed)
+        }
+        FlagReason::MalformedRemittance => "unusable remittance".into(),
     }
 }
 
@@ -98,5 +128,88 @@ impl fmt::Display for ChaseList {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ledger::records::{Adjudication, LineRecord};
+
+    fn line(answered: bool) -> LineRecord {
+        LineRecord {
+            service_line_id: "L1".into(),
+            procedure_code: "99213".into(),
+            units: 1,
+            unit_charge: Money::from_cents(1000),
+            do_not_bill: false,
+            adjudication: answered.then(|| Adjudication {
+                payer_paid: Money::from_cents(1000),
+                coinsurance: Money::ZERO,
+                copay: Money::ZERO,
+                deductible: Money::ZERO,
+                not_allowed: Money::ZERO,
+                denial_reason: None,
+                adjudicated_at: VirtualTime::default(),
+            }),
+        }
+    }
+
+    fn record(state: ClaimState, attempts: u32, lines: Vec<LineRecord>) -> ClaimRecord {
+        ClaimRecord {
+            claim_id: ClaimId("c-1".into()),
+            identity: None,
+            state,
+            attempts,
+            ingested_at: VirtualTime::default(),
+            first_submitted_at: None,
+            resolved_at: None,
+            lines,
+            history: Vec::new(),
+        }
+    }
+
+    fn awaiting() -> ClaimState {
+        ClaimState::AwaitingResponse {
+            timeout_at: VirtualTime::default(),
+        }
+    }
+
+    #[test]
+    fn awaiting_splits_into_first_wait_retrying_and_partial() {
+        let first = record(awaiting(), 1, vec![line(false)]);
+        assert_eq!(status_label(&first), "awaiting 1st response");
+
+        let retrying = record(awaiting(), 3, vec![line(false)]);
+        assert_eq!(status_label(&retrying), "retrying (attempt 3)");
+
+        // Partially answered wins over the retry label: the evidence of a
+        // half-arrived remittance is the more specific story.
+        let partial = record(awaiting(), 2, vec![line(true), line(false)]);
+        assert_eq!(status_label(&partial), "partial remit (1/2 lines)");
+    }
+
+    #[test]
+    fn flags_render_cause_and_money_delta() {
+        let short = record(
+            ClaimState::Flagged {
+                reason: FlagReason::ReconciliationFailed {
+                    billed: Money::from_cents(266_206),
+                    accounted: Money::from_cents(266_123),
+                },
+            },
+            1,
+            vec![line(true)],
+        );
+        assert_eq!(status_label(&short), "flagged: doesn't sum (short $0.83)");
+
+        let exhausted = record(
+            ClaimState::Flagged {
+                reason: FlagReason::RetriesExhausted,
+            },
+            3,
+            vec![line(false)],
+        );
+        assert_eq!(status_label(&exhausted), "flagged: no response, gave up");
     }
 }
