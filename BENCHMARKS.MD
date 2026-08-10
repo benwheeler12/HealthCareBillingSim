@@ -51,6 +51,57 @@ was observed and discarded, see Method).
   outlier — first-touch page faults on an 8.7 GiB heap plus cold file cache
   — and is excluded; three warm repeats of the old binary agree closely.
 
+## How the measurements work
+
+Three layers of instrumentation, each answering a different question:
+
+**1. Process level — "how much, in total?"** A wrapper starts a monotonic
+wall clock, runs the binary to completion, then reads
+`getrusage(RUSAGE_CHILDREN)`: the kernel's own accounting of CPU seconds
+(user + system) and peak resident memory for the finished child. Two
+derived numbers do a lot of work here:
+
+- **utilization = CPU ÷ wall.** A single-threaded process caps at 100%;
+  188% on a 4-thread run says the process averaged fewer than 2 busy cores
+  — parallelism is leaking somewhere, before you know where.
+- **user vs system split.** ~65–90s of *system* time per run is the kernel
+  cost of coordination — channel wakeups, task switches, page faults on a
+  10 GiB heap. High sys time is the signature of orchestration overhead
+  rather than useful compute.
+
+**2. Phase level — "where did it go?"** `run()` has natural barriers, and
+`SIM_PHASES=1` stamps a monotonic clock at each one: after `ingest()`
+returns (last line read, validated, emitted, spawned), after the claim-task
+JoinSet drains and the fold returns (every claim terminal, books folded),
+and after `finalize()` (log sorted, snapshot rebuilt); the binary prints
+the three deltas on stderr, and `print_reports` times itself the same way.
+This is how "the simulation is not the bottleneck" became measurable: claim
+tasks are spawned *as lines are ingested* and run concurrently on the other
+workers, so by the time ingest finishes, almost all lifecycle work has
+already happened in its shadow. The **drain** phase — everything between
+"last claim spawned" and "every claim terminal, fold caught up" — is the
+residual simulation work on the critical path, and it measures **1–2s at
+every thread count**. If claim processing or the fold were the bottleneck,
+drain is exactly where the time would pile up; it doesn't.
+
+**3. Differential level — "prove the attribution."** Change one stage,
+hold everything else fixed, re-measure: parallelizing JSON validation cut
+the ingest phase 76s → ~40s (so parsing was most of ingest); deepening the
+ledger channel 1024 → 64k cut several more seconds (so producers were
+parking on the fold's buffer, not on the fold's speed); adding worker
+threads moved ingest and finalize but never moved drain (so the lifecycle
+work was never on the critical path to begin with). Each optimization
+doubles as evidence for the phase attribution — the needle moves exactly
+where the phase timings said the time was.
+
+The same rigor applies to the baseline: the first 1M run of the session
+measured 277.5s with an anomalous 147s of system time — a cold-start
+outlier (first-touch faults on a fresh 8.7 GiB heap, cold file cache) —
+and three warm repeats that agree within 8% replaced it. Deeper tools
+(perf/flamegraphs, tokio-console, criterion) would refine the picture
+per-function, but phase barriers + kernel accounting + differential runs
+were enough to locate every second of this pipeline.
+
 ## Results (1M records)
 
 | implementation | threads | wall (s) | CPU (s) | peak RSS | vs old |

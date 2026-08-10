@@ -29,7 +29,7 @@ cargo run -- data/sample_claims.jsonl --preset honest
 # Roll your own input at any size:
 cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out claims.jsonl
 
-# Tests (55) and lints:
+# Tests (56) and lints:
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
@@ -89,30 +89,31 @@ Configuration layers, later wins: **defaults → `--preset` →
 ## Architecture in one screen
 
 ```
-input file ──▶ ingest (validate, rate-limit, dedup)
+input file ──▶ ingest (parallel validate, computed arrival times, dedup)
                  │ Rejected rows            │ valid claims
                  ▼                          ▼
-             ledger fold ◀──events── claim task ×N (one per claim_id)
-             (single-consumer         │ submit    ▲ remittance
-              mpsc, folds +           ▼           │
-              raw event log)      clearinghouse ──┴─▶ remittance dispatcher
-                                      │  ▲            (correlate by claim_id;
-                                      ▼  │             quarantine unknowns)
-                                payer task per delivery
-                                (stateless, seeded)          sim-truth recorder
-                                                             (ground truth oracle)
+             ledger fold ◀──events── claim task ×N (one per claim_id,
+             (single-consumer         │        ▲     in parallel across workers)
+              mpsc, folds +           │ transact(submission) → Transaction:
+              raw event log)          ▼        │  every arrival, with times
+                                  clearinghouse (sync Transactor call —
+                                  payer adjudication executes on the
+                                  calling task's thread; stateless, seeded)
+                                      │
+              quarantine clerk ◀──────┘ strays        sim-truth recorder
+              (uncorrelatable deliveries)             (ground truth oracle)
 ```
 
 - **Claim tasks** own the whole lifecycle as linear async code: submit,
-  `select!` response-vs-deadline, bounded retry with backoff, reconcile,
-  emit terminal event, return. Task completion == terminal state, so
-  **shutdown is structural**: input exhausted + tasks drained ⇒ channels
-  close in dependency order ⇒ fold returns ⇒ reports print ⇒ exit. No
-  shutdown signals anywhere.
+  compare next-declared-arrival vs deadline, bounded retry with backoff,
+  reconcile, emit terminal event, return. Task completion == terminal
+  state, so **shutdown is structural**: input exhausted + tasks drained ⇒
+  channels close in dependency order ⇒ fold returns ⇒ reports print ⇒
+  exit. No shutdown signals anywhere.
 - **Functional core, imperative shell**: every lifecycle decision is the pure
   `machine::next(state, event, claim, policy, now) → (state, actions)`;
-  adjudication and reconciliation are pure functions. The async fns only move
-  messages and sleep.
+  adjudication and reconciliation are pure functions. The async fns only
+  move messages and do arithmetic — nothing sleeps.
 - **Two ledgers**: the biller's-knowledge ledger (only what remittances
   revealed) vs the sim-truth recorder (every fault actually injected). The
   gap is the biller's blind spot; sim-truth is the oracle in every fault test
@@ -227,6 +228,19 @@ and rejection events, timeout/retry decisions, late/garbage/quarantine
 warnings, end-of-run counts. The ledger also retains the raw event log —
 live state for runtime monitoring, replayable history for audit — and every
 claim record carries its full append-only event history.
+
+## Performance
+
+Benchmarked at 1M records against the previous paused-clock architecture
+(which was pinned to one thread by tokio's `start_paused` constraint):
+**2.1× end-to-end on a 4-core box** — 158.7s → 76.1s median — of which
+1.29× is the computed-time model alone (the deleted timer machinery) and
+the rest is real parallelism. The claim lifecycles themselves drain in
+under 2 seconds at any thread count; the remaining wall time is data
+plumbing (parse, fold, sort, reports), which is where any further scaling
+work would go. Old and new produce **byte-identical reports** for the same
+seed. Full method, hardware profile, per-phase numbers, and the Amdahl
+analysis: [BENCHMARKS.MD](BENCHMARKS.MD).
 
 ## Design docs
 
