@@ -29,3 +29,54 @@ pub struct FaultProfile {
     /// transit. Epistemically silence (Decisions #8); timeout machinery owns it.
     pub corrupt_remittance_rate: f64,
 }
+
+impl FaultProfile {
+    /// One-line human summary of the enabled faults — shared by the stdout
+    /// banner and the TUI's payer detail.
+    pub fn summary(&self) -> String {
+        let pct = |x: f64| format!("{:.0}%", x * 100.0);
+        let human = |secs: f64| match secs {
+            s if s >= 86_400.0 => format!("{:.0}d", s / 86_400.0),
+            s if s >= 3_600.0 => format!("{:.1}h", s / 3_600.0),
+            s if s >= 60.0 => format!("{:.1}m", s / 60.0),
+            s => format!("{s:.0}s"),
+        };
+        let mut parts = Vec::new();
+        if self.forward_drop_rate > 0.0 {
+            parts.push(format!("forward drops {}", pct(self.forward_drop_rate)));
+        }
+        if self.return_drop_rate > 0.0 {
+            parts.push(format!("return drops {}", pct(self.return_drop_rate)));
+        }
+        if self.duplicate_rate > 0.0 {
+            parts.push(format!("duplicates {}", pct(self.duplicate_rate)));
+        }
+        if self.extra_delay_rate > 0.0 {
+            parts.push(format!(
+                "delays {} (≤{})",
+                pct(self.extra_delay_rate),
+                human(self.max_extra_delay_secs)
+            ));
+        }
+        if self.dishonest_adjudication_rate > 0.0 {
+            parts.push(format!(
+                "dishonest {}",
+                pct(self.dishonest_adjudication_rate)
+            ));
+        }
+        if self.line_drop_rate > 0.0 {
+            parts.push(format!("line drops {}", pct(self.line_drop_rate)));
+        }
+        if self.corrupt_claim_id_rate > 0.0 {
+            parts.push(format!("corrupt ids {}", pct(self.corrupt_claim_id_rate)));
+        }
+        if self.corrupt_remittance_rate > 0.0 {
+            parts.push(format!("garbage {}", pct(self.corrupt_remittance_rate)));
+        }
+        if parts.is_empty() {
+            "none — honest, lossless transport".to_string()
+        } else {
+            parts.join(" · ")
+        }
+    }
+}
