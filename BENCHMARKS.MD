@@ -8,8 +8,8 @@ how close multi-core scaling gets to linear.
 ## Verdict up front
 
 - **Correctness parity is exact**: old and new binaries produce
-  **byte-identical reports** on the 5k sample for both the `messy` and
-  `chaos` presets, all 56 tests pass, and a new invariant test pins that the
+  **byte-identical reports** on the 5k sample bundled at the time (since
+  replaced by a 10k sample) for both the `messy` and `chaos` presets, all 56 tests pass, and a new invariant test pins that the
   full finalized event log (timestamps and order included) is identical
   across parallel runs at any worker count.
 - **End-to-end speedup on this 4-core box: 2.1×** (158.7s → 76.1s median).

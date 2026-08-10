@@ -294,9 +294,9 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     disputes), anthem's is lossy and slow (claims aging through retries into
     90+). Presets carry realistic day-scale response times and follow-up
     policy; virtual durations render in days/months wherever users see them
-    (wall-clock runtime stays in real seconds). The 5k sample is generated
-    with a drifting payer mix (anthem-heavy early, medicare-heavy late) to
-    sharpen the contrast.
+    (wall-clock runtime stays in real seconds). The bundled 10k sample is
+    generated with a drifting payer mix (anthem-heavy early, medicare-heavy
+    late) to sharpen the contrast.
 21. **Interactive TUI as the default terminal experience** (ratatui). Reports
     are arrayed as panes on a static screen (←/→ to navigate, ↑/↓ to scroll or
     select, Enter on the chase list opens a claim's full audit trail — the
