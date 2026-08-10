@@ -367,10 +367,15 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     sorting worth having. UI reshaped around insight order: the run opens on
     the Timeline; payer A/R and patient-responsibility aging merge into one
     Aging pane (two sections); the Chase pane becomes Provider Insights —
-    every outstanding receivable with provider and a risk score
-    (outstanding dollars × days aged, deliberately simple), sortable by
-    cost/age/risk in either direction from the keyboard. "aetna" stopped
-    being the canonical unknown payer in tests and the generator's
+    a master–detail view: a provider list (aggregated open count + total
+    outstanding, biggest book first) drives a live claims panel beside it,
+    with a risk score (outstanding dollars × days aged, deliberately
+    simple) and cost/age/risk sorting in either direction; Tab or Enter
+    steps focus between the lists, Enter on a claim opens the audit trail.
+    UI convention settled here: pane-specific instructions render at the
+    top of the pane they belong to, and the bottom status box's keys line
+    is a constant — it never rewords itself per pane or phase. "aetna"
+    stopped being the canonical unknown payer in tests and the generator's
     malformed lines the moment it became real ("acme_health" now).
 
 ## Module layout
