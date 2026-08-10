@@ -24,13 +24,27 @@ pub enum PayerId {
     Medicare,
     UnitedHealthGroup,
     Anthem,
+    Aetna,
+    Cigna,
+    Humana,
+    BlueCrossBlueShield,
+    KaiserPermanente,
+    Centene,
+    MolinaHealthcare,
 }
 
 impl PayerId {
-    pub const ALL: [PayerId; 3] = [
+    pub const ALL: [PayerId; 10] = [
         PayerId::Medicare,
         PayerId::UnitedHealthGroup,
         PayerId::Anthem,
+        PayerId::Aetna,
+        PayerId::Cigna,
+        PayerId::Humana,
+        PayerId::BlueCrossBlueShield,
+        PayerId::KaiserPermanente,
+        PayerId::Centene,
+        PayerId::MolinaHealthcare,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -38,6 +52,13 @@ impl PayerId {
             PayerId::Medicare => "medicare",
             PayerId::UnitedHealthGroup => "united_health_group",
             PayerId::Anthem => "anthem",
+            PayerId::Aetna => "aetna",
+            PayerId::Cigna => "cigna",
+            PayerId::Humana => "humana",
+            PayerId::BlueCrossBlueShield => "blue_cross_blue_shield",
+            PayerId::KaiserPermanente => "kaiser_permanente",
+            PayerId::Centene => "centene",
+            PayerId::MolinaHealthcare => "molina_healthcare",
         }
     }
 }

@@ -214,32 +214,31 @@ pub fn preset(name: &str) -> Option<Scenario> {
     const VDAY: f64 = 86_400.0;
     let mut scenario = Scenario::default();
 
-    // Shared personality base: medicare answers in days, commercial payers in
-    // weeks; the biller follows up after 45 days, twice, a week apart.
-    scenario.payers.insert(
-        PayerId::Medicare,
-        PayerPatch {
-            min_response_time_secs: Some(3.0 * VDAY),
-            max_response_time_secs: Some(10.0 * VDAY),
-            ..PayerPatch::default()
-        },
-    );
-    scenario.payers.insert(
-        PayerId::UnitedHealthGroup,
-        PayerPatch {
-            min_response_time_secs: Some(10.0 * VDAY),
-            max_response_time_secs: Some(25.0 * VDAY),
-            ..PayerPatch::default()
-        },
-    );
-    scenario.payers.insert(
-        PayerId::Anthem,
-        PayerPatch {
-            min_response_time_secs: Some(20.0 * VDAY),
-            max_response_time_secs: Some(40.0 * VDAY),
-            ..PayerPatch::default()
-        },
-    );
+    // Shared personality base: government-adjacent payers answer in days,
+    // commercial payers in weeks, the strugglers in a month-plus; the biller
+    // follows up after 45 days, twice, a week apart.
+    let bands: [(PayerId, f64, f64); 10] = [
+        (PayerId::KaiserPermanente, 2.0, 8.0),
+        (PayerId::Medicare, 3.0, 10.0),
+        (PayerId::Aetna, 5.0, 12.0),
+        (PayerId::Cigna, 8.0, 20.0),
+        (PayerId::BlueCrossBlueShield, 10.0, 22.0),
+        (PayerId::UnitedHealthGroup, 10.0, 25.0),
+        (PayerId::Humana, 12.0, 26.0),
+        (PayerId::Centene, 14.0, 30.0),
+        (PayerId::MolinaHealthcare, 18.0, 38.0),
+        (PayerId::Anthem, 20.0, 40.0),
+    ];
+    for (payer, min_days, max_days) in bands {
+        scenario.payers.insert(
+            payer,
+            PayerPatch {
+                min_response_time_secs: Some(min_days * VDAY),
+                max_response_time_secs: Some(max_days * VDAY),
+                ..PayerPatch::default()
+            },
+        );
+    }
     scenario.policy = PolicyPatch {
         max_attempts: Some(3),
         timeout_secs: Some(45.0 * VDAY),
@@ -275,6 +274,44 @@ pub fn preset(name: &str) -> Option<Scenario> {
                 max_extra_delay_secs: Some(30.0 * VDAY),
                 ..FaultPatch::default()
             };
+            // The other route personalities, quieter but distinct: kaiser's
+            // route is nearly perfect; molina's is anthem's little sibling;
+            // centene loses claims outright; bcbs's clearinghouse route
+            // stutters with duplicates.
+            let kaiser = scenario
+                .payers
+                .get_mut(&PayerId::KaiserPermanente)
+                .expect("base");
+            kaiser.faults = FaultPatch {
+                forward_drop_rate: Some(0.01),
+                return_drop_rate: Some(0.01),
+                duplicate_rate: Some(0.01),
+                ..FaultPatch::default()
+            };
+            let molina = scenario
+                .payers
+                .get_mut(&PayerId::MolinaHealthcare)
+                .expect("base");
+            molina.faults = FaultPatch {
+                forward_drop_rate: Some(0.20),
+                return_drop_rate: Some(0.12),
+                extra_delay_rate: Some(0.15),
+                max_extra_delay_secs: Some(20.0 * VDAY),
+                ..FaultPatch::default()
+            };
+            let centene = scenario.payers.get_mut(&PayerId::Centene).expect("base");
+            centene.faults = FaultPatch {
+                forward_drop_rate: Some(0.15),
+                ..FaultPatch::default()
+            };
+            let bcbs = scenario
+                .payers
+                .get_mut(&PayerId::BlueCrossBlueShield)
+                .expect("base");
+            bcbs.faults = FaultPatch {
+                duplicate_rate: Some(0.15),
+                ..FaultPatch::default()
+            };
         }
         // Everything at once: heavy transport chaos, semantic faults, a
         // denial-happy anthem, and a tight retry budget.
@@ -292,6 +329,11 @@ pub fn preset(name: &str) -> Option<Scenario> {
             };
             let anthem = scenario.payers.get_mut(&PayerId::Anthem).expect("base");
             anthem.denial_rate = Some(0.35);
+            let molina = scenario
+                .payers
+                .get_mut(&PayerId::MolinaHealthcare)
+                .expect("base");
+            molina.denial_rate = Some(0.30);
             scenario.policy.max_attempts = Some(2);
         }
         _ => return None,

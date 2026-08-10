@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn unknown_payer_is_a_schema_error() {
-        let line = valid_line().replace("medicare", "aetna");
+        let line = valid_line().replace("medicare", "acme_health");
         let (id, err) = validate_line(&line).unwrap_err();
         assert_eq!(id, Some(ClaimId("c-1".into())));
         assert!(matches!(err, ValidationError::Schema(_)));

@@ -88,6 +88,8 @@ struct Done {
     chase: Vec<ChaseItem>,
     table: TableState,
     timeline: Timeline,
+    sort: SortKey,
+    sort_desc: bool,
     /// Open claim-detail overlay, if any.
     detail: Option<String>,
 }
@@ -97,8 +99,26 @@ struct Pane {
     content: String,
 }
 
-const TIMELINE_PANE: usize = 1;
-const CHASE_PANE: usize = 6;
+/// Sort order for the provider-insights receivables table.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortKey {
+    Cost,
+    Age,
+    Risk,
+}
+
+impl SortKey {
+    fn label(self) -> &'static str {
+        match self {
+            SortKey::Cost => "cost",
+            SortKey::Age => "age",
+            SortKey::Risk => "risk",
+        }
+    }
+}
+
+const TIMELINE_PANE: usize = 0;
+const INSIGHTS_PANE: usize = 5;
 
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
@@ -176,19 +196,24 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
             app.pane = (app.pane + 1) % panes;
             app.scroll = 0;
         }
-        KeyCode::Up if app.pane == CHASE_PANE => move_selection(done, -1),
-        KeyCode::Down if app.pane == CHASE_PANE => move_selection(done, 1),
-        KeyCode::PageUp if app.pane == CHASE_PANE => move_selection(done, -10),
-        KeyCode::PageDown if app.pane == CHASE_PANE => move_selection(done, 10),
+        KeyCode::Up if app.pane == INSIGHTS_PANE => move_selection(done, -1),
+        KeyCode::Down if app.pane == INSIGHTS_PANE => move_selection(done, 1),
+        KeyCode::PageUp if app.pane == INSIGHTS_PANE => move_selection(done, -10),
+        KeyCode::PageDown if app.pane == INSIGHTS_PANE => move_selection(done, 10),
         KeyCode::Up => app.scroll = app.scroll.saturating_sub(1),
         KeyCode::Down => app.scroll = app.scroll.saturating_add(1),
         KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(10),
         KeyCode::PageDown => app.scroll = app.scroll.saturating_add(10),
-        KeyCode::Enter if app.pane == CHASE_PANE => {
+        KeyCode::Enter if app.pane == INSIGHTS_PANE => {
             if let Some(item) = done.table.selected().and_then(|i| done.chase.get(i)) {
                 done.detail = Some(claim_detail(&done.output, &item.claim_id.0));
             }
         }
+        // Sort keys on the insights table: pressing the active key flips the
+        // direction, pressing another switches to it (descending first).
+        KeyCode::Char('c') if app.pane == INSIGHTS_PANE => done.set_sort(SortKey::Cost),
+        KeyCode::Char('a') if app.pane == INSIGHTS_PANE => done.set_sort(SortKey::Age),
+        KeyCode::Char('r') if app.pane == INSIGHTS_PANE => done.set_sort(SortKey::Risk),
         _ => {}
     }
     false
@@ -223,14 +248,6 @@ fn final_progress(output: &RunOutput) -> Progress {
 impl Done {
     fn build(output: RunOutput) -> Done {
         let (books, as_of) = (&output.intake_ledger, output.intake_finished_at);
-        let aging = ar_aging(books, as_of).to_string();
-        let (payer_aging, patient_aging) = match aging.find("=== Patient") {
-            Some(idx) => (
-                aging[..idx].trim_end().to_string(),
-                aging[idx..].to_string(),
-            ),
-            None => (aging, String::new()),
-        };
 
         let overview = format!(
             "{}\n{}\n\nA/R panes are a snapshot as of end of intake ({as_of}) — the books\nas a biller sees them mid-flight. The run then drained every claim to a\nterminal state by {} (the correctness guarantee).",
@@ -238,8 +255,11 @@ impl Done {
             summarize(&output.ledger),
             output.finished_at,
         );
-        let payer_pane = format!(
-            "{payer_aging}\n\ndays in A/R: {:.1}   (as of {as_of})",
+        // Both aging sections — payer A/R and patient responsibility — as one
+        // pane; ar_aging's Display already renders them as two sections.
+        let aging_pane = format!(
+            "{}\ndays in A/R: {:.1}   (as of {as_of})",
+            ar_aging(books, as_of),
             days_in_ar(books, as_of)
         );
         let chase = chase_list(books, as_of, 500);
@@ -256,20 +276,16 @@ impl Done {
 
         let panes = vec![
             Pane {
-                title: "Overview",
-                content: overview,
-            },
-            Pane {
                 title: "Timeline",
                 content: String::new(),
             },
             Pane {
-                title: "AR Aging",
-                content: payer_pane,
+                title: "Overview",
+                content: overview,
             },
             Pane {
-                title: "Patient",
-                content: patient_aging,
+                title: "Aging",
+                content: aging_pane,
             },
             Pane {
                 title: "Scorecard",
@@ -280,7 +296,7 @@ impl Done {
                 content: Denials(denial_breakdown(&output.ledger)).to_string(),
             },
             Pane {
-                title: "Chase",
+                title: "Provider Insights",
                 content: String::new(),
             },
             Pane {
@@ -288,13 +304,51 @@ impl Done {
                 content: diagnostic(&output.ledger, &output.sim_truth).to_string(),
             },
         ];
-        Done {
+        let mut done = Done {
             output,
             panes,
             chase,
             table,
             timeline,
+            sort: SortKey::Risk,
+            sort_desc: true,
             detail: None,
+        };
+        done.resort();
+        done
+    }
+
+    /// Toggle direction when the active key is pressed again; switch keys
+    /// descending-first otherwise.
+    fn set_sort(&mut self, key: SortKey) {
+        if self.sort == key {
+            self.sort_desc = !self.sort_desc;
+        } else {
+            self.sort = key;
+            self.sort_desc = true;
+        }
+        self.resort();
+    }
+
+    fn resort(&mut self) {
+        let key = self.sort;
+        self.chase.sort_by(|a, b| {
+            let ordering = match key {
+                SortKey::Cost => a.outstanding.cmp(&b.outstanding),
+                SortKey::Age => a.age.cmp(&b.age),
+                SortKey::Risk => a
+                    .risk()
+                    .partial_cmp(&b.risk())
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            };
+            // Deterministic tiebreak keeps equal rows stable across resorts.
+            ordering.then_with(|| a.claim_id.cmp(&b.claim_id))
+        });
+        if self.sort_desc {
+            self.chase.reverse();
+        }
+        if !self.chase.is_empty() {
+            self.table.select(Some(0));
         }
     }
 }
@@ -350,8 +404,8 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
                 .divider("");
             frame.render_widget(tabs, tabs_area);
 
-            if app.pane == CHASE_PANE {
-                draw_chase(frame, content, done);
+            if app.pane == INSIGHTS_PANE {
+                draw_insights(frame, content, done);
             } else if app.pane == TIMELINE_PANE {
                 draw_timeline(frame, content, done);
             } else {
@@ -570,9 +624,26 @@ fn fmt_axis(v: f64) -> String {
     }
 }
 
-fn draw_chase(frame: &mut ratatui::Frame, area: Rect, done: &mut Done) {
-    let header = Row::new(["claim", "payer", "outstanding", "age", "att", "status"])
-        .style(Style::default().add_modifier(Modifier::BOLD));
+fn draw_insights(frame: &mut ratatui::Frame, area: Rect, done: &mut Done) {
+    let arrow = if done.sort_desc { "↓" } else { "↑" };
+    let sort_header = |name: &str, key: SortKey| {
+        if done.sort == key {
+            format!("{name} {arrow}")
+        } else {
+            name.to_string()
+        }
+    };
+    let header = Row::new([
+        "claim".to_string(),
+        "payer".to_string(),
+        "provider".to_string(),
+        sort_header("outstanding", SortKey::Cost),
+        sort_header("age", SortKey::Age),
+        sort_header("risk", SortKey::Risk),
+        "att".to_string(),
+        "status".to_string(),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
     let rows: Vec<Row> = done
         .chase
         .iter()
@@ -580,26 +651,32 @@ fn draw_chase(frame: &mut ratatui::Frame, area: Rect, done: &mut Done) {
             Row::new([
                 item.claim_id.0.clone(),
                 item.payer_id.as_str().to_string(),
+                item.provider.clone(),
                 item.outstanding.to_string(),
                 format!("{:.1}d", item.age.as_secs_f64() / 86_400.0),
+                format!("{:.0}", item.risk()),
                 item.attempts.to_string(),
                 item.status.clone(),
             ])
         })
         .collect();
     let widths = [
-        Constraint::Length(14),
-        Constraint::Length(20),
+        Constraint::Length(12),
+        Constraint::Length(22),
+        Constraint::Length(26),
         Constraint::Length(12),
         Constraint::Length(8),
+        Constraint::Length(9),
         Constraint::Length(4),
-        Constraint::Min(20),
+        Constraint::Min(16),
     ];
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::bordered().title(format!(
-            " Chase — {} open receivables · enter for the claim's audit trail ",
-            done.chase.len()
+            " Provider insights — {} outstanding receivables · sorted by {} {} (risk = $ × days) ",
+            done.chase.len(),
+            done.sort.label(),
+            arrow,
         )))
         .row_highlight_style(
             Style::default()
@@ -654,8 +731,13 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 wall.as_secs_f64(),
                 app.seed
             ),
-            "←/→ panes · ↑/↓ scroll or select · enter claim detail · q quit (prints plain report)"
-                .to_string(),
+            if app.pane == INSIGHTS_PANE {
+                "←/→ panes · ↑/↓ select · enter claim detail · c/a/r sort by cost/age/risk (again to flip) · q quit"
+                    .to_string()
+            } else {
+                "←/→ panes · ↑/↓ scroll or select · enter claim detail · q quit (prints plain report)"
+                    .to_string()
+            },
         ),
     };
     let status = Paragraph::new(format!("{headline}\n{keys}"))
