@@ -76,7 +76,7 @@ fn slow_payer_does_not_delay_other_payers() {
                 "anthem claim {} was supposed to be slow",
                 record.claim_id
             ),
-            PayerId::UnitedHealthGroup => {}
+            _ => {}
         }
     }
 }

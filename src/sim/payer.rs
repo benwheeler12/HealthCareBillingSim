@@ -71,6 +71,90 @@ pub fn default_payer_configs() -> HashMap<PayerId, PayerConfig> {
                 copay: Money::from_cents(4_000),
             },
         ),
+        (
+            PayerId::Aetna,
+            PayerConfig {
+                min_response_time_secs: 2.0,
+                max_response_time_secs: 8.0,
+                denial_rate: 0.08,
+                max_not_allowed_bps: 1_200,
+                max_deductible_bps: 1_200,
+                coinsurance_bps: 1_500,
+                copay: Money::from_cents(2_000),
+            },
+        ),
+        (
+            PayerId::Cigna,
+            PayerConfig {
+                min_response_time_secs: 3.0,
+                max_response_time_secs: 12.0,
+                denial_rate: 0.10,
+                max_not_allowed_bps: 1_400,
+                max_deductible_bps: 1_600,
+                coinsurance_bps: 2_000,
+                copay: Money::from_cents(3_000),
+            },
+        ),
+        (
+            PayerId::Humana,
+            PayerConfig {
+                min_response_time_secs: 3.0,
+                max_response_time_secs: 14.0,
+                denial_rate: 0.09,
+                max_not_allowed_bps: 1_300,
+                max_deductible_bps: 1_400,
+                coinsurance_bps: 1_800,
+                copay: Money::from_cents(2_500),
+            },
+        ),
+        (
+            PayerId::BlueCrossBlueShield,
+            PayerConfig {
+                min_response_time_secs: 4.0,
+                max_response_time_secs: 15.0,
+                denial_rate: 0.12,
+                max_not_allowed_bps: 1_600,
+                max_deductible_bps: 1_700,
+                coinsurance_bps: 2_200,
+                copay: Money::from_cents(3_500),
+            },
+        ),
+        (
+            PayerId::KaiserPermanente,
+            PayerConfig {
+                min_response_time_secs: 1.0,
+                max_response_time_secs: 6.0,
+                denial_rate: 0.04,
+                max_not_allowed_bps: 700,
+                max_deductible_bps: 900,
+                coinsurance_bps: 1_200,
+                copay: Money::from_cents(1_500),
+            },
+        ),
+        (
+            PayerId::Centene,
+            PayerConfig {
+                min_response_time_secs: 5.0,
+                max_response_time_secs: 20.0,
+                denial_rate: 0.14,
+                max_not_allowed_bps: 1_800,
+                max_deductible_bps: 1_900,
+                coinsurance_bps: 2_500,
+                copay: Money::from_cents(3_000),
+            },
+        ),
+        (
+            PayerId::MolinaHealthcare,
+            PayerConfig {
+                min_response_time_secs: 6.0,
+                max_response_time_secs: 25.0,
+                denial_rate: 0.16,
+                max_not_allowed_bps: 2_000,
+                max_deductible_bps: 2_100,
+                coinsurance_bps: 2_800,
+                copay: Money::from_cents(3_500),
+            },
+        ),
     ])
 }
 

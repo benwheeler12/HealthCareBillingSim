@@ -356,6 +356,23 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     load-dependent latency) breaks the declared-duration model and returns
     us to parallel-DES territory.
 
+24. **Richer marketplace, insight-first UI.** Ten payers (the original three
+    plus aetna, cigna, humana, blue_cross_blue_shield, kaiser_permanente,
+    centene, molina_healthcare), each with a day-scale response band and —
+    in the messy/chaos presets — a distinct clearinghouse-route personality
+    (kaiser near-perfect, molina as anthem's lossy sibling, centene
+    drop-prone, bcbs duplicate-happy). The generator emits 100 distinct
+    billing organizations with stable NPIs, volume skewed quadratically so a
+    few high-volume practices dominate — which is what makes provider-level
+    sorting worth having. UI reshaped around insight order: the run opens on
+    the Timeline; payer A/R and patient-responsibility aging merge into one
+    Aging pane (two sections); the Chase pane becomes Provider Insights —
+    every outstanding receivable with provider and a risk score
+    (outstanding dollars × days aged, deliberately simple), sortable by
+    cost/age/risk in either direction from the keyboard. "aetna" stopped
+    being the canonical unknown payer in tests and the generator's
+    malformed lines the moment it became real ("acme_health" now).
+
 ## Module layout
 
 ```

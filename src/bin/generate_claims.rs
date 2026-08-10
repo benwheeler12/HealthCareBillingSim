@@ -46,11 +46,59 @@ const FIRST_NAMES: &[&str] = &[
     "Annie",
     "Mary",
     "Dorothy",
+    "Edsger",
+    "Barbara",
+    "Donald",
 ];
 const LAST_NAMES: &[&str] = &[
-    "Lovelace", "Turing", "Hopper", "Johnson", "Easley", "Jackson",
+    "Lovelace", "Turing", "Hopper", "Johnson", "Easley", "Jackson", "Liskov", "Knuth", "Dijkstra",
+    "Hamilton",
 ];
-const PAYERS: &[&str] = &["medicare", "united_health_group", "anthem"];
+
+/// (payer_id, weight at file start, weight at file end). Weights drift
+/// linearly across the file: the slow, lossy payers (anthem, molina)
+/// dominate early and the fast, clean ones (medicare, kaiser) late, so the
+/// A/R aging report shows a distinct profile per payer when the file is
+/// ingested over virtual months. Each column sums to 1.0.
+const PAYERS_DRIFT: &[(&str, f64, f64)] = &[
+    ("anthem", 0.30, 0.04),
+    ("molina_healthcare", 0.14, 0.04),
+    ("centene", 0.10, 0.06),
+    ("humana", 0.08, 0.08),
+    ("blue_cross_blue_shield", 0.08, 0.08),
+    ("cigna", 0.08, 0.08),
+    ("united_health_group", 0.08, 0.08),
+    ("aetna", 0.06, 0.10),
+    ("kaiser_permanente", 0.04, 0.14),
+    ("medicare", 0.04, 0.30),
+];
+
+/// 100 distinct billing organizations, each with its own rendering provider
+/// and stable NPI: ORG_PLACES[i / 10] × ORG_KINDS[i % 10].
+const ORG_PLACES: &[&str] = &[
+    "Riverside",
+    "Lakeside",
+    "Summit",
+    "Cedar Grove",
+    "Harborview",
+    "Prairie",
+    "Blue Ridge",
+    "Sunrise",
+    "Willow Creek",
+    "Maple Leaf",
+];
+const ORG_KINDS: &[&str] = &[
+    "Family Practice",
+    "Medical Group",
+    "Health Associates",
+    "Clinic",
+    "Physicians",
+    "Care Center",
+    "Orthopedics",
+    "Pediatrics",
+    "Internal Medicine",
+    "Wellness Center",
+];
 const PROCEDURES: &[&str] = &[
     "99213", "99214", "36415", "73030", "93000", "97110", "99396",
 ];
@@ -79,25 +127,40 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Payer for this line. Uniform by default; with drift, anthem dominates the
-/// start of the file and medicare the end.
+/// Payer for this line. Uniform by default; with drift, the slow payers
+/// dominate the start of the file and the fast ones the end.
 fn pick_payer(rng: &mut ChaCha8Rng, drift: bool, position: f64) -> &'static str {
     if !drift {
-        return PAYERS[rng.random_range(0..PAYERS.len())];
+        return PAYERS_DRIFT[rng.random_range(0..PAYERS_DRIFT.len())].0;
     }
-    let anthem = 0.55 + (0.10 - 0.55) * position;
-    let medicare = 0.10 + (0.55 - 0.10) * position;
-    let draw: f64 = rng.random_range(0.0..1.0);
-    if draw < anthem {
-        "anthem"
-    } else if draw < anthem + medicare {
-        "medicare"
-    } else {
-        "united_health_group"
+    let mut draw: f64 = rng.random_range(0.0..1.0);
+    for (payer, early, late) in PAYERS_DRIFT {
+        let weight = early + (late - early) * position;
+        if draw < weight {
+            return payer;
+        }
+        draw -= weight;
     }
+    PAYERS_DRIFT.last().expect("non-empty").0
+}
+
+/// One of 100 distinct (organization, rendering provider, NPI) triples.
+/// The draw is squared so volume concentrates on the low indices — a few
+/// high-volume practices and a long tail, which is what makes the provider
+/// insights view worth sorting.
+fn pick_provider(rng: &mut ChaCha8Rng) -> (String, &'static str, &'static str, String) {
+    let uniform: f64 = rng.random_range(0.0..1.0);
+    let index = ((uniform * uniform) * 100.0) as usize % 100;
+    let org = format!("{} {}", ORG_PLACES[index / 10], ORG_KINDS[index % 10]);
+    // Stable per-organization provider and NPI, derived from the index.
+    let first = FIRST_NAMES[index % FIRST_NAMES.len()];
+    let last = LAST_NAMES[(index / 10 + index) % LAST_NAMES.len()];
+    let npi = format!("19{:08}", 1_234_567 + index * 731);
+    (org, first, last, npi)
 }
 
 fn valid_line(rng: &mut ChaCha8Rng, i: usize, drift: bool, position: f64) -> String {
+    let (org, provider_first, provider_last, npi) = pick_provider(rng);
     let lines: Vec<serde_json::Value> = (0..rng.random_range(1..=4))
         .map(|l| {
             json!({
@@ -126,11 +189,11 @@ fn valid_line(rng: &mut ChaCha8Rng, i: usize, drift: bool, position: f64) -> Str
             "dob": format!("19{:02}-{:02}-{:02}",
                 rng.random_range(40..99), rng.random_range(1..=12), rng.random_range(1..=28)),
         },
-        "organization": {"name": "Riverside Family Practice"},
+        "organization": {"name": org},
         "rendering_provider": {
-            "first_name": "Grace",
-            "last_name": "Hopper",
-            "npi": format!("{:010}", rng.random_range(1_000_000_000u64..=9_999_999_999)),
+            "first_name": provider_first,
+            "last_name": provider_last,
+            "npi": npi,
         },
         "service_lines": lines,
     })
@@ -148,10 +211,9 @@ fn malformed_line(rng: &mut ChaCha8Rng, i: usize, drift: bool, position: f64) ->
             format!("{}bad{}", &valid[..npi_start], &valid[npi_start + 3..])
         }
         // 1.2: unknown payer.
-        2 => valid
-            .replacen(PAYERS[0], "aetna", 1)
-            .replacen(PAYERS[1], "aetna", 1)
-            .replacen(PAYERS[2], "aetna", 1),
+        2 => PAYERS_DRIFT.iter().fold(valid, |line, (payer, _, _)| {
+            line.replacen(payer, "acme_health", 1)
+        }),
         // 1.2: negative charge.
         3 => {
             let amt = valid.find("\"unit_charge_amount\":").expect("amount") + 21;

@@ -15,9 +15,10 @@ spec, the test matrix, and (deliberately) the git history.
 
 ```sh
 # The default run already has weather in it — drops, duplicates, delays,
-# and per-payer route personalities (preset 'messy'), payers answering in
-# days-to-weeks, and the 10k sample spread across ~9.5 virtual months, so
-# the AR aging report fills every bucket with a distinct profile per payer:
+# and per-route personalities (preset 'messy') across ten payers and one
+# hundred billing organizations, payers answering in days-to-weeks, and the
+# 10k sample spread across ~9.5 virtual months, so the AR aging report
+# fills every bucket with a distinct profile per payer:
 cargo run -- data/sample_claims_10k.jsonl
 
 # The showcase: every fault class at once plus a denial-happy anthem:
@@ -43,11 +44,16 @@ cargo clippy --all-targets -- -D warnings
 ## CLI
 
 On a real terminal, runs open an **interactive UI**: the reports are panes on
-a static screen — ←/→ to move between Overview, Timeline, AR Aging, Patient,
-Scorecard, Denials, Chase, and Diagnostic; ↑/↓ scrolls (or selects rows in
-the chase list); **Enter on a chase-list row opens that claim's full audit
-trail** — every event with virtual timestamps, straight from the
-event-sourced ledger. The **Timeline pane charts the run**: a 2×2 grid of
+a static screen, opening on the Timeline — ←/→ to move between Timeline,
+Overview, Aging (payer A/R and patient responsibility as two sections),
+Scorecard, Denials, Provider Insights, and Diagnostic; ↑/↓ scrolls (or
+selects rows in the receivables table). The **Provider Insights pane** lists
+every outstanding receivable — claim, payer, provider (one of 100 billing
+organizations), outstanding, age, and a risk score (dollars × days stuck) —
+sortable by **c**ost, **a**ge, or **r**isk, either direction (press the key
+again to flip); **Enter on a row opens that claim's full audit trail** —
+every event with virtual timestamps, straight from the event-sourced
+ledger. The **Timeline pane charts the run**: a 2×2 grid of
 small multiples — per-virtual-day rates for ingested, submitted, remitted,
 and settled on one shared scale, so submitted riding above ingested reads
 as retry traffic (the fault injection made visible) — over a chart of the
@@ -81,7 +87,7 @@ Configuration layers, later wins: **defaults → `--preset` →
 - `--seed` reproduces outcomes exactly; `--rate` is claims per *virtual*
   second — the default (0.0004, one claim every ~42 virtual minutes) spreads
   the 10k sample across ~9.5 virtual months so receivables genuinely age;
-  `--chase` sizes the chase list.
+  `--chase` sizes the outstanding-receivables list.
 - Scenario files and presets can set **per-payer fault profiles** (a payer
   entry's `faults` section) — different clearinghouse routes fail
   differently, which is what gives each payer its own aging profile.
@@ -194,7 +200,7 @@ test — `git log --oneline` reads as the fault table. Highlights:
 
 ## Reports (all pure functions over a ledger snapshot + now)
 
-The A/R views (aging, chase list, days in A/R) report over a **snapshot
+The A/R views (aging, receivables list, days in A/R) report over a **snapshot
 frozen at the moment intake ends** — a real A/R report is mid-flight by
 nature; on the final books every young receivable has been deliberately
 driven terminal, which would empty the young buckets by construction. The
@@ -207,7 +213,8 @@ adjudication, when it became patient debt) · `days in A/R` headline ·
 `payer scorecard` — avg response, denial rate, paid/billed, derived from
 remittance data alone; run the demo scenario and watch it rediscover
 anthem's injected slow/denial-happy personality · `denial breakdown` by
-(payer, reason) · `chase list` (outstanding desc, age desc) · `sim-truth
+(payer, reason) · `outstanding receivables` (the chase list: cost, age,
+risk = dollars × days) · `sim-truth
 diagnostic` — the biller's view side by side with what the adversary
 actually did.
 
