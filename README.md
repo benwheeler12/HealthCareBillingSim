@@ -43,37 +43,36 @@ cargo clippy --all-targets -- -D warnings
 
 ## CLI
 
-On a real terminal, runs open an **interactive UI**: five panes on a
-numbered tab bar, money views first — ←/→ (or 1–5) to move between
-**A/R Aging**, **Payer Scorecard**, **Provider Insights**, **Simulation
-Overview**, and **Simulation Timeline**; ↑/↓ scrolls (or selects rows in
-the focused list), `?` opens a keyboard map, and each pane carries its
-own hint row at the top while the status box at the bottom never changes
-its text. The run opens on the **A/R Aging pane**, a master–detail view:
-a provider list on the left (the whole portfolio first, then each billing
-organization by open payer A/R) drives the aging tables on the right —
-buckets colored green → red with a per-payer mix bar, recomputed for
-whichever book is selected; Tab hops focus so ↑/↓ can either change the
-provider or scroll the tables. The **Payer Scorecard pane** merges the
-scorecard and denial reports into a league table graded on the curve
-(A–F from denial rate, response time, and paid share, best to worst,
-with inline bars); ↑/↓ picks a payer and two stat tables below —
-**Configured** and **Observed** — put the personality the simulation
-assigned next to what the scorecard rediscovered from remittance data
-alone, above that payer's denial breakdown by reason. The **Simulation
-Overview pane is the whole run on one page**: a breakdown of the actual
-configuration values the run executed with (seed, ingest rate per
-virtual minute, retry policy, every enabled fault rate), the outcomes
-that came out (a claims funnel and a money waterfall as proportional
-bars), and between them the cause→effect table — every injected fault
-kind (ground truth) beside the symptom it left on the biller's books.
-The **Simulation Timeline pane charts the run**: a 2×2 grid of small
-multiples — per-virtual-day rates for ingested, submitted, remitted, and
-settled on one shared scale, so submitted riding above ingested reads as
-retry traffic (the fault injection made visible) — over a chart of the
-in-flight backlog, which rises through intake and drains to zero: the
-correctness guarantee as a picture, replayed from the retained event
-log. The **Provider Insights pane** is a master–detail view: scroll a list of billing
+On a real terminal, runs open an **interactive UI**: four panes on a
+numbered tab bar, money views first — ←/→ (or 1–4) to move between
+**A/R Aging**, **Payer Scorecard**, **Provider Insights**, and
+**Timeline**; ↑/↓ scrolls (or selects rows in the focused list), `?`
+opens a keyboard map, and each pane carries its own hint row at the top
+while the status box at the bottom never changes its text. Every report
+pane is scrollable by provider. The run opens on the **A/R Aging pane**,
+a master–detail view: a provider list on the left (the whole portfolio
+first, then each billing organization by open payer A/R) drives the
+report on the right — the outcome bars up top (a claims funnel and a
+money waterfall as proportional bars, from the drained final books) over
+the aging tables, buckets colored green → red with a per-payer mix bar,
+all recomputed for whichever book is selected; Tab hops focus so ↑/↓ can
+either change the provider or scroll the report. The **Payer Scorecard
+pane** merges the scorecard and denial reports into a league table
+graded on the curve (A–F from denial rate, response time, and paid
+share, best to worst, with inline bars); ↑/↓ picks a payer and two stat
+tables below — **Configured** and **Observed** — put the personality the
+simulation assigned next to what the scorecard rediscovered from
+remittance data alone, above that payer's denial breakdown by reason.
+The **Timeline pane charts the run**, per book: the same provider list
+drives a 2×2 grid of small multiples — per-virtual-day rates for
+ingested, submitted, remitted, and settled on one shared scale, so
+submitted riding above ingested reads as retry traffic (the fault
+injection made visible) — over a chart of the in-flight backlog, which
+rises through intake and drains to zero: the correctness guarantee as a
+picture, replayed from the retained event log and re-bucketed for
+whichever organization is selected (every timeline shares the
+portfolio's x-axis, so shapes stay comparable). The **Provider Insights
+pane** is a master–detail view: scroll a list of billing
 organizations (100 in the sample, sorted by total outstanding) and the
 panel beside it live-updates with that provider's open claims —
 outstanding, age, and a risk score (dollars × days stuck), sortable by
@@ -92,8 +91,9 @@ virtual clock, and wall time (plus a drain gauge while the run is in
 flight). `q` quits and prints the plain report so a record stays in your
 scrollback. When stdout is not a terminal (pipes, CI) or with `--no-tui`,
 output is the plain sequential report — that path still prints every
-report, including the standalone denial breakdown and sim-truth
-diagnostic that the UI folds into its merged panes.
+report, including the full configuration banner, the standalone denial
+breakdown, and the sim-truth diagnostic (the god's-eye injected-faults
+view lives only there).
 
 The input file is the single required argument (one PayerClaim JSON object
 per line; schema in `docs/TAKE_HOME_PROMPT.MD`). Everything else is an

@@ -52,11 +52,6 @@ pub fn keys_hint(pairs: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
-/// A plain explanatory hint line (no keys to call out).
-pub fn hint(text: &str) -> Line<'static> {
-    Line::from(Span::styled(format!(" {text}"), dim()))
-}
-
 /// Proportional multi-segment bar (largest-remainder apportionment, so the
 /// cells always sum to `width`). Zero-weight everything renders as an empty
 /// track rather than nothing.

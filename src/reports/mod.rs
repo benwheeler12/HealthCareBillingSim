@@ -15,4 +15,4 @@ pub use aging::{ArAging, ar_aging, ar_aging_for, days_in_ar, days_in_ar_for};
 pub use chase::{ChaseList, chase_list};
 pub use diagnostic::{Diagnostic, diagnostic};
 pub use scorecard::{Denials, Scorecard, denial_breakdown, payer_scorecard};
-pub use summary::{Summary, summarize};
+pub use summary::{Summary, summarize, summarize_for};
