@@ -45,11 +45,20 @@ pub struct ArAging {
 }
 
 pub fn ar_aging(ledger: &Ledger, now: VirtualTime) -> ArAging {
+    ar_aging_for(ledger, now, None)
+}
+
+/// The same aging report, restricted to one billing organization when
+/// `provider` is given — the interactive UI's per-provider drill-down.
+pub fn ar_aging_for(ledger: &Ledger, now: VirtualTime, provider: Option<&str>) -> ArAging {
     let mut report = ArAging::default();
     for record in ledger.claims.values() {
         let Some(identity) = &record.identity else {
             continue; // rejected-at-parse rows carry no payer
         };
+        if provider.is_some_and(|p| identity.organization_name != p) {
+            continue;
+        }
         let outstanding = record.payer_outstanding();
         // No let-chain here: the repo builds on rustc 1.85 (edition 2024
         // minimum), which predates stabilized let-chains.
@@ -82,14 +91,30 @@ pub fn ar_aging(ledger: &Ledger, now: VirtualTime) -> ArAging {
 /// Days in A/R headline: total payer outstanding / (total billed / elapsed
 /// virtual days). The single number a practice owner watches.
 pub fn days_in_ar(ledger: &Ledger, now: VirtualTime) -> f64 {
-    let outstanding: Money = ledger.claims.values().map(|r| r.payer_outstanding()).sum();
-    let billed: Money = ledger
-        .claims
-        .values()
-        .flat_map(|r| r.lines.iter())
-        .filter(|l| !l.do_not_bill)
-        .map(|l| l.billed())
-        .sum();
+    days_in_ar_for(ledger, now, None)
+}
+
+/// Days in A/R over one billing organization's book when `provider` is
+/// given; the whole portfolio otherwise.
+pub fn days_in_ar_for(ledger: &Ledger, now: VirtualTime, provider: Option<&str>) -> f64 {
+    let records = ledger.claims.values().filter(|r| {
+        provider.is_none()
+            || r.identity
+                .as_ref()
+                .zip(provider)
+                .is_some_and(|(id, p)| id.organization_name == p)
+    });
+    let mut outstanding = Money::ZERO;
+    let mut billed = Money::ZERO;
+    for record in records {
+        outstanding += record.payer_outstanding();
+        billed += record
+            .lines
+            .iter()
+            .filter(|l| !l.do_not_bill)
+            .map(|l| l.billed())
+            .sum::<Money>();
+    }
     let elapsed_days = now.as_duration().as_secs_f64() / VIRTUAL_DAY.as_secs_f64();
     if billed == Money::ZERO || elapsed_days == 0.0 {
         return 0.0;

@@ -402,16 +402,23 @@ Class 4 — reclassified as **architectural invariants**, not faults:
 26. **TUI audit: five panes, one visual language.** The seven-pane layout
     had two weak screens (Overview and Diagnostic were thin text dumps) and
     two near-duplicates (Scorecard and Denials cover the same remittance
-    data). Collapsed to five: Timeline · Overview · Payer Scorecard · A/R
-    Aging · Provider Insights. The merged Overview is the run on one page —
-    configuration left, outcomes right (claims funnel + money waterfall as
-    proportional bars), and the old diagnostic reborn as a cause→effect
-    table: each injected fault kind (ground truth) beside the symptom it
-    left on the books, which is the input→output link made explicit. The
-    merged Payer Scorecard is a league table graded on the curve (A–F over
-    denial rate / response time / paid share) whose selection drives a
-    detail panel: configured personality vs what the remittances revealed
-    (the closed-loop demo on one screen) plus that payer's denial reasons.
+    data). Collapsed to five, ordered money-first: A/R Aging · Payer
+    Scorecard · Provider Insights · Simulation Overview · Simulation
+    Timeline (the run opens on A/R Aging). The merged Overview is the run
+    on one page — a breakdown of the executed configuration values on the
+    left (seed, ingest rate shown per virtual minute, retry policy, every
+    enabled fault rate — values, not provenance), outcomes right (claims
+    funnel + money waterfall as proportional bars), and the old diagnostic
+    reborn as a cause→effect table: each injected fault kind (ground
+    truth) beside the symptom it left on the books, which is the
+    input→output link made explicit. The merged Payer Scorecard is a
+    league table graded on the curve (A–F over denial rate / response time
+    / paid share) whose selection drives two stat tables — Configured and
+    Observed, the closed-loop demo on one screen — plus that payer's
+    denial reasons. A/R Aging is itself a master–detail view: a provider
+    list (whole portfolio first) re-derives the colored aging tables per
+    billing organization, via `ar_aging_for`/`days_in_ar_for` filtered
+    variants of the pure report functions.
     `tui.rs` split into a module tree (`tui/{theme,timeline,overview,
     payers,aging,insights}`) with a shared theme — one accent, one hint
     style, one bar vocabulary (largest-remainder segment bars, unit-tested)

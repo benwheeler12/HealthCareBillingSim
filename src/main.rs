@@ -311,6 +311,13 @@ fn banner_rows(cli: &Cli, cfg: &RunConfig, provenance: &[String]) -> Vec<(String
     } else {
         String::new()
     };
+    // Displayed per virtual minute — nobody thinks in 0.0004 claims/second.
+    let per_min = cfg.rate_per_sec * 60.0;
+    let rate_display = match per_min {
+        r if r >= 10.0 => format!("{r:.0}"),
+        r if r >= 1.0 => format!("{r:.1}"),
+        r => format!("{r:.2}"),
+    };
     let mut rows = vec![
         (
             "input".to_string(),
@@ -319,10 +326,7 @@ fn banner_rows(cli: &Cli, cfg: &RunConfig, provenance: &[String]) -> Vec<(String
         ("seed".to_string(), cfg.seed.to_string()),
         (
             "ingest rate".to_string(),
-            format!(
-                "{} claims per virtual second{interval_hint}",
-                cfg.rate_per_sec
-            ),
+            format!("{rate_display} claims per virtual minute{interval_hint}"),
         ),
         (
             "retry policy".to_string(),

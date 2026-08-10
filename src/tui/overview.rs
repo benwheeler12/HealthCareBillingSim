@@ -7,16 +7,16 @@
 //! god's-eye comparison IS the link between simulation parameters and outputs,
 //! so the two views belong on one screen.
 
-use std::collections::HashSet;
-
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use healthcare_billing_sim::RunOutput;
-use healthcare_billing_sim::domain::PayerId;
+use healthcare_billing_sim::biller::policy::RetryPolicy;
+use healthcare_billing_sim::domain::{PayerId, human_virtual};
 use healthcare_billing_sim::reports::{days_in_ar, diagnostic, summarize};
+use healthcare_billing_sim::sim::faults::FaultProfile;
 use healthcare_billing_sim::sim::sim_truth::FaultKind;
 
 use super::theme::{
@@ -25,46 +25,107 @@ use super::theme::{
 
 const BAR_WIDTH: usize = 44;
 
+/// The actual configuration values the run executed with, captured from
+/// `RunConfig` before the simulation consumed it — the "what went in" panel
+/// renders these directly instead of a provenance one-liner.
+pub struct ConfigFacts {
+    pub seed: u64,
+    pub rate_per_sec: f64,
+    pub policy: RetryPolicy,
+    pub faults: FaultProfile,
+    /// Payers whose clearinghouse route overrides the shared fault profile.
+    pub route_count: usize,
+}
+
 pub struct Overview {
     inputs: Vec<Line<'static>>,
     outcomes: Vec<Line<'static>>,
     links: Vec<Line<'static>>,
 }
 
-pub fn build(output: &RunOutput, banner_rows: &[(String, String)]) -> Overview {
+pub fn build(
+    output: &RunOutput,
+    banner_rows: &[(String, String)],
+    facts: &ConfigFacts,
+) -> Overview {
     Overview {
-        inputs: input_lines(banner_rows),
+        inputs: input_lines(banner_rows, facts),
         outcomes: outcome_lines(output),
         links: link_lines(output),
     }
 }
 
-/// Configuration rows, minus the ten per-payer personality rows — those live
-/// in the Payer Scorecard pane where they sit next to observed behavior.
-/// Long values wrap on their ` · ` separators so nothing is truncated.
-fn input_lines(banner_rows: &[(String, String)]) -> Vec<Line<'static>> {
-    let payer_labels: HashSet<&str> = PayerId::ALL.iter().map(|p| p.as_str()).collect();
-    let mut lines: Vec<Line> = Vec::new();
-    for (label, value) in banner_rows
-        .iter()
-        .filter(|(label, _)| !payer_labels.contains(label.as_str()))
-    {
-        for (i, chunk) in wrap_segments(value, 52).into_iter().enumerate() {
-            lines.push(match i {
-                0 => Line::from(vec![
-                    Span::styled(format!(" {label:<13}"), bold()),
-                    Span::raw(chunk),
-                ]),
-                _ => Line::from(vec![Span::raw(" ".repeat(14)), Span::styled(chunk, dim())]),
-            });
-        }
+/// One row of the configuration table; long values wrap on their ` · `
+/// separators so nothing is truncated.
+fn push_input(lines: &mut Vec<Line<'static>>, label: &str, value: &str) {
+    for (i, chunk) in wrap_segments(value, 52).into_iter().enumerate() {
+        lines.push(match i {
+            0 => Line::from(vec![
+                Span::styled(format!(" {label:<13}"), bold()),
+                Span::raw(chunk),
+            ]),
+            _ => Line::from(vec![Span::raw(" ".repeat(14)), Span::styled(chunk, dim())]),
+        });
     }
+}
+
+/// The configuration breakdown: every value the run executed with, from the
+/// captured config itself. Per-payer personalities live in the Payer
+/// Scorecard pane, where they sit next to observed behavior.
+fn input_lines(banner_rows: &[(String, String)], facts: &ConfigFacts) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some((_, value)) = banner_rows.iter().find(|(label, _)| label == "input") {
+        push_input(&mut lines, "input", value);
+    }
+    push_input(&mut lines, "seed", &facts.seed.to_string());
+    let per_min = facts.rate_per_sec * 60.0;
+    let interval = if facts.rate_per_sec < 0.1 {
+        format!(" (one every {})", human_virtual(1.0 / facts.rate_per_sec))
+    } else {
+        String::new()
+    };
+    push_input(
+        &mut lines,
+        "ingest rate",
+        &format!("{} claims per virtual minute{interval}", fmt_rate(per_min)),
+    );
+    push_input(
+        &mut lines,
+        "retry policy",
+        &format!(
+            "{} attempts · {} timeout · {} backoff base",
+            facts.policy.max_attempts,
+            theme::human_compact(facts.policy.timeout.as_secs_f64()),
+            theme::human_compact(facts.policy.backoff_base.as_secs_f64()),
+        ),
+    );
+    push_input(&mut lines, "faults", &facts.faults.summary());
+    push_input(
+        &mut lines,
+        "payers",
+        &format!(
+            "{} personalities, {} with route-specific faults",
+            PayerId::ALL.len(),
+            facts.route_count
+        ),
+    );
     lines.push(Line::from(vec![
-        Span::styled(format!(" {:<13}", "payers"), bold()),
-        Span::raw("10 personalities — see "),
-        Span::styled("Payer Scorecard [3]", theme::accent_bold()),
+        Span::raw(" ".repeat(14)),
+        Span::styled(
+            "→ configured vs observed in Payer Scorecard [2]",
+            theme::accent_bold(),
+        ),
     ]));
     lines
+}
+
+/// "1.4" / "0.02" / "60" — enough precision to be honest at any rate scale.
+fn fmt_rate(per_min: f64) -> String {
+    match per_min {
+        r if r >= 10.0 => format!("{r:.0}"),
+        r if r >= 1.0 => format!("{r:.1}"),
+        r => format!("{r:.2}"),
+    }
 }
 
 /// Greedy wrap on ` · ` separators, falling back to word wrap for a segment
@@ -179,7 +240,7 @@ fn outcome_lines(output: &RunOutput) -> Vec<Line<'static>> {
     lines.push(Line::from(vec![
         Span::raw("        days in A/R at the intake snapshot: "),
         Span::styled(format!("{dar:.1}"), theme::accent_bold()),
-        Span::styled("  (details in A/R Aging [4])", dim()),
+        Span::styled("  (details in A/R Aging [1])", dim()),
     ]));
     lines
 }

@@ -258,13 +258,33 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut PayersView) {
         );
         return;
     };
-    let lines = detail_lines(selected, view);
+
+    // Two stat tables side by side — what the simulation configured for this
+    // payer, and what the scorecard rediscovered from remittances alone —
+    // with the denial breakdown underneath.
+    let [stats_area, denials_area] =
+        Layout::vertical([Constraint::Length(6), Constraint::Min(3)]).areas(detail_area);
+    let [config_area, observed_area] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .areas(stats_area);
     frame.render_widget(
-        Paragraph::new(lines).block(theme::panel(format!(
-            "{} — configured personality vs what the remittances revealed",
+        Paragraph::new(configured_lines(selected, view)).block(theme::panel(format!(
+            "Configured — {}",
             selected.payer.as_str()
         ))),
-        detail_area,
+        config_area,
+    );
+    frame.render_widget(
+        Paragraph::new(observed_lines(selected))
+            .block(theme::panel("Observed — from remittance data alone")),
+        observed_area,
+    );
+    frame.render_widget(
+        Paragraph::new(denial_lines(selected, view)).block(theme::panel(format!(
+            "Denied lines by reason — {}",
+            selected.payer.as_str()
+        ))),
+        denials_area,
     );
 }
 
@@ -276,39 +296,59 @@ fn denial_color(frac: f64) -> Color {
     }
 }
 
-/// The closed-loop demo, spelled out: the simulation configured this payer's
-/// personality; the scorecard rediscovered it from remittance data alone.
-fn detail_lines(row: &PayerRow, view: &PayersView) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    if let Some(cfg) = view.configs.get(&row.payer) {
-        lines.push(Line::from(vec![
-            Span::styled(" configured ", theme::accent_bold()),
-            Span::raw(format!(
-                "responds in {}–{} · denies {:.0}% of lines · copay {}",
-                theme::human_compact(cfg.min_response_time_secs),
-                theme::human_compact(cfg.max_response_time_secs),
-                cfg.denial_rate * 100.0,
-                money(cfg.copay),
-            )),
-        ]));
-        if let Some(route) = view.routes.get(&row.payer) {
-            lines.push(Line::from(vec![
-                Span::styled(" route      ", theme::accent_bold()),
-                Span::styled(route.summary(), dim()),
-            ]));
-        }
-    }
-    lines.push(Line::from(vec![
-        Span::styled(" observed   ", theme::accent_bold()),
-        Span::raw(format!(
-            "first answer in {} avg · denies {} of adjudicated lines · pays {} of billed",
-            theme::human_compact(row.score.avg_response_secs),
-            pct(row.score.denial_rate),
-            pct(row.score.paid_to_billed),
-        )),
-    ]));
-    lines.push(Line::default());
+/// A label/value stat row for the Configured and Observed tables.
+fn stat(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" {label:<16}"), theme::accent_bold()),
+        Span::raw(value),
+    ])
+}
 
+/// What the simulation configured for this payer — the personality the
+/// scorecard is supposed to rediscover.
+fn configured_lines(row: &PayerRow, view: &PayersView) -> Vec<Line<'static>> {
+    let Some(cfg) = view.configs.get(&row.payer) else {
+        return vec![Line::from(Span::styled(" no configuration found", dim()))];
+    };
+    let mut lines = vec![
+        stat(
+            "responds in",
+            format!(
+                "{} – {}",
+                theme::human_compact(cfg.min_response_time_secs),
+                theme::human_compact(cfg.max_response_time_secs)
+            ),
+        ),
+        stat(
+            "denies",
+            format!("{:.0}% of lines", cfg.denial_rate * 100.0),
+        ),
+        stat("copay", money(cfg.copay)),
+    ];
+    lines.push(match view.routes.get(&row.payer) {
+        Some(route) => stat("route faults", route.summary()),
+        None => stat("route faults", "none — shared transport only".to_string()),
+    });
+    lines
+}
+
+/// What the scorecard rediscovered from remittance data alone.
+fn observed_lines(row: &PayerRow) -> Vec<Line<'static>> {
+    vec![
+        stat(
+            "avg 1st answer",
+            theme::human_compact(row.score.avg_response_secs),
+        ),
+        stat(
+            "denial rate",
+            format!("{} of adjudicated lines", pct(row.score.denial_rate)),
+        ),
+        stat("paid / billed", pct(row.score.paid_to_billed)),
+        stat("claims", theme::thousands(row.score.claims as u64)),
+    ]
+}
+
+fn denial_lines(row: &PayerRow, view: &PayersView) -> Vec<Line<'static>> {
     let reasons: Vec<(&DenialReason, &(usize, Money))> = view
         .denials
         .iter()
@@ -316,18 +356,17 @@ fn detail_lines(row: &PayerRow, view: &PayersView) -> Vec<Line<'static>> {
         .map(|((_, reason), stats)| (reason, stats))
         .collect();
     if reasons.is_empty() {
-        lines.push(Line::from(Span::styled(
+        return vec![Line::from(Span::styled(
             " no denial lines booked for this payer",
             dim(),
-        )));
-        return lines;
+        ))];
     }
     let denied_total: Money = reasons.iter().map(|(_, (_, m))| *m).sum();
-    lines.push(Line::from(vec![
-        Span::styled(" denied lines by reason — ", bold()),
+    let mut lines = vec![Line::from(vec![
+        Span::styled(" total ", bold()),
         Span::styled(money(denied_total), theme::bold().fg(BAD)),
-        Span::styled(" billed on denied lines", bold()),
-    ]));
+        Span::styled(" billed on denied lines", dim()),
+    ])];
     for (reason, (count, amount)) in reasons {
         let share = if denied_total.cents() > 0 {
             amount.cents() as f64 / denied_total.cents() as f64
