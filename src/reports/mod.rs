@@ -6,12 +6,14 @@
 //! (DESIGN.md Decisions); that is the report's entire purpose.
 
 pub mod aging;
+pub mod analysis;
 pub mod chase;
 pub mod diagnostic;
 pub mod scorecard;
 pub mod summary;
 
 pub use aging::{ArAging, ar_aging, ar_aging_for, days_in_ar, days_in_ar_for};
+pub use analysis::provider_analysis;
 pub use chase::{ChaseList, chase_list};
 pub use diagnostic::{Diagnostic, diagnostic};
 pub use scorecard::{Denials, Scorecard, denial_breakdown, payer_scorecard};

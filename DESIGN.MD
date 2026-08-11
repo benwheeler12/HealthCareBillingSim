@@ -234,15 +234,18 @@ money-first (A/R Aging · Payer Scorecard · Provider Insights · Timeline) on a
 numbered tab bar. Conventions, settled deliberately:
 
 - **Layered navigation, three keys**: arrows move, Enter steps down a layer
-  (provider → claims → audit trail; aging report → timeline scrubber), Esc steps
+  (provider → A/R analysis; aging report → timeline scrubber), Esc steps
   back up, the top layer being the pane bar. Ctrl-C is the only exit and prints
   the plain report on the way out, so a scrollback record always remains.
 - **One moment per pane**: every number on a pane derives from the same snapshot.
   A/R Aging views the books as of one scrubbable virtual day (default: end of
   intake, the mid-flight view a biller lives in); Provider Insights reads the
   drained final books — what's still open at the end is exactly the human-review
-  pile. Statuses render in plain English derived from the record's evidence
-  ("retrying (attempt 3)", "flagged: doesn't sum (short $0.83)").
+  pile, digested into a per-provider plain-English analysis (aging concentration,
+  status mix, payer signals, top chase items by risk = dollars × days, and
+  recommended actions). Every figure is computed from the ledger; statuses keep
+  the record's evidence ("retrying (attempt 3)", "flagged: doesn't sum
+  (short $0.83)").
 - **Hints live in the pane they describe**; the bottom status line never changes
   its text; `?` opens the full keyboard map.
 - The simulation runs on a worker thread; the UI owns the main thread on the wall
