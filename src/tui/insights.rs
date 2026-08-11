@@ -193,12 +193,8 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, ins: &mut Insights, chase: &
     frame.render_widget(
         theme::keys_hint(&[
             ("↑/↓", "select"),
-            (
-                "enter",
-                "step down — into the claims, then a claim's audit trail",
-            ),
-            ("esc", "step back up"),
-            ("c a r", "sort claims by cost/age/risk (again flips)"),
+            ("enter", "claims, then a claim's audit trail"),
+            ("c a r", "sort by cost/age/risk (again flips)"),
         ]),
         hint_area,
     );

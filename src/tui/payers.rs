@@ -168,13 +168,7 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut PayersView) {
     .areas(area);
 
     frame.render_widget(
-        theme::keys_hint(&[
-            ("↑/↓", "pick a payer — the detail below follows"),
-            (
-                "grades",
-                "on the curve: denial rate + response time + paid share",
-            ),
-        ]),
+        theme::keys_hint(&[("↑/↓", "pick a payer — the detail below follows")]),
         hint_area,
     );
 

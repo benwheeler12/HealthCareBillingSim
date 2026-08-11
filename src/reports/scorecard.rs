@@ -180,10 +180,12 @@ impl fmt::Display for Denials {
             )?;
         }
         if rows.len() > SHOWN {
-            let (lines, money) = rows.iter().skip(SHOWN).fold(
-                (0usize, Money::ZERO),
-                |(lines, money), (_, (count, m))| (lines + count, money + *m),
-            );
+            let (lines, money) = rows
+                .iter()
+                .skip(SHOWN)
+                .fold((0usize, Money::ZERO), |(lines, money), (_, (count, m))| {
+                    (lines + count, money + *m)
+                });
             writeln!(
                 f,
                 "  … and {} more (payer, reason) pairs · {} lines · {}",

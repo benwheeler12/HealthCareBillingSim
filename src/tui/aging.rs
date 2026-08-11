@@ -520,12 +520,8 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut AgingView, output
         Layout::vertical([Constraint::Length(1), Constraint::Min(4)]).areas(area);
     frame.render_widget(
         theme::keys_hint(&[
-            ("↑/↓", "pick a provider (all providers first)"),
-            (
-                "enter",
-                "into the report — ↑/↓ scroll, ←/→ move a day (hold: ×4), esc back",
-            ),
-            ("green → red", "receivables aging past 90 days"),
+            ("↑/↓", "pick a provider"),
+            ("enter", "step into the report"),
         ]),
         hint_area,
     );
