@@ -148,7 +148,7 @@ fn all_faults_at_once_every_claim_terminal_and_deterministic() {
     assert_ne!(fingerprint(&output), fingerprint(&chaos(7)), "seeds differ");
 }
 
-/// Decisions #23: computed time on the multi-thread scheduler. Not just
+/// DESIGN.md 'Virtual time': computed time on the multi-thread scheduler. Not just
 /// outcomes — the *entire finalized event log*, timestamps and order
 /// included, must be identical across runs no matter how the worker threads
 /// interleave. This is the test that replaces the paused-clock spike as the

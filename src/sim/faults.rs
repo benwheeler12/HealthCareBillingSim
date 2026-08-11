@@ -26,7 +26,7 @@ pub struct FaultProfile {
     /// Fault 3.2: probability a remittance's claim_id is mangled in transit.
     pub corrupt_claim_id_rate: f64,
     /// Fault 3.5: probability a remittance turns to unparseable garbage in
-    /// transit. Epistemically silence (Decisions #8); timeout machinery owns it.
+    /// transit. Epistemically silence (DESIGN.md Decisions); timeout machinery owns it.
     pub corrupt_remittance_rate: f64,
 }
 
@@ -43,13 +43,13 @@ impl FaultProfile {
         };
         let mut parts = Vec::new();
         if self.forward_drop_rate > 0.0 {
-            parts.push(format!("forward drops {}", pct(self.forward_drop_rate)));
+            parts.push(format!("fwd drops {}", pct(self.forward_drop_rate)));
         }
         if self.return_drop_rate > 0.0 {
-            parts.push(format!("return drops {}", pct(self.return_drop_rate)));
+            parts.push(format!("ret drops {}", pct(self.return_drop_rate)));
         }
         if self.duplicate_rate > 0.0 {
-            parts.push(format!("duplicates {}", pct(self.duplicate_rate)));
+            parts.push(format!("dups {}", pct(self.duplicate_rate)));
         }
         if self.extra_delay_rate > 0.0 {
             parts.push(format!(

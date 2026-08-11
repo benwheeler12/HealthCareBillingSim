@@ -1,5 +1,5 @@
 //! Virtual time. All timestamps are durations since simulation start,
-//! computed — never read from any clock, wall or paused (Decisions #23).
+//! computed — never read from any clock, wall or paused (DESIGN.md 'Virtual time').
 
 use std::fmt;
 use std::ops::Add;

@@ -1,5 +1,5 @@
 //! Payer adjudication: a pure function of (seed, claim, config). No payer
-//! state anywhere — idempotency via derivation (Decisions #1): re-delivering
+//! state anywhere — idempotency via derivation (DESIGN.md Decisions): re-delivering
 //! the same claim reproduces the identical remittance.
 
 use std::collections::HashMap;

@@ -21,7 +21,7 @@ pub struct ClaimRecord {
     // identity (immutable after ingest)
     pub claim_id: ClaimId,
     /// `None` only for rejected rows whose document never yielded an identity
-    /// (parse errors, missing insurance block) — see Decisions #13.
+    /// (parse errors, missing insurance block) — see DESIGN.md schema.
     pub identity: Option<ClaimIdentity>,
     // lifecycle
     pub state: ClaimState,
@@ -46,7 +46,7 @@ pub struct ClaimIdentity {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ClaimState {
-    /// Ingested, not yet submitted (Decisions #13). Gap is ms-scale.
+    /// Ingested, not yet submitted (DESIGN.md schema). Gap is ms-scale.
     Pending,
     /// Terminal at ingest; still a ledger row.
     Rejected { reason: ValidationError },
@@ -80,7 +80,7 @@ pub struct LineRecord {
     pub procedure_code: String,
     pub units: u32,
     pub unit_charge: Money,
-    /// Recorded but excluded from submission and money aggregates (Decisions #9).
+    /// Recorded but excluded from submission and money aggregates (DESIGN.md Decisions).
     pub do_not_bill: bool,
     /// None = unanswered; partial claims have a mix.
     pub adjudication: Option<Adjudication>,

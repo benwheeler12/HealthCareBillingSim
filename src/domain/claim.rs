@@ -89,7 +89,7 @@ pub struct ServiceLine {
     pub units: u32,
     pub unit_charge: Money,
     /// Recorded in the ledger, excluded from submission and money aggregates
-    /// (Decisions #9).
+    /// (DESIGN.md Decisions).
     pub do_not_bill: bool,
 }
 

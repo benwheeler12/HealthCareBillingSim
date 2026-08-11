@@ -1,5 +1,5 @@
 //! Quarantine clerk — what remains of the remittance dispatcher under
-//! computed time (Decisions #23). Correlation-by-ID moved into the claim
+//! computed time (DESIGN.md 'Virtual time'). Correlation-by-ID moved into the claim
 //! task (each task matches payloads against its own claim_id), so the
 //! routing map, registration protocol, and retirement set are gone. What
 //! reaches the clerk is exactly what could never correlate: remittances

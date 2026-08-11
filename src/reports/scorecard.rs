@@ -133,13 +133,13 @@ impl fmt::Display for Scorecard {
         writeln!(f, "=== Payer scorecard (from remittance data alone) ===")?;
         writeln!(
             f,
-            "  {:<20} {:>7} {:>16} {:>12} {:>14}",
+            "  {:<22} {:>7} {:>16} {:>12} {:>14}",
             "payer", "claims", "avg response", "denial rate", "paid/billed"
         )?;
         for (payer, s) in &self.0 {
             writeln!(
                 f,
-                "  {:<20} {:>7} {:>16} {:>11.1}% {:>13.1}%",
+                "  {:<22} {:>7} {:>16} {:>11.1}% {:>13.1}%",
                 payer.as_str(),
                 s.claims,
                 human_response(s.avg_response_secs),
@@ -159,19 +159,39 @@ impl fmt::Display for Denials {
         if self.0.is_empty() {
             return writeln!(f, "  none");
         }
+        // The full breakdown grows with the input; print the rows that carry
+        // the money and roll the tail up into one line.
+        const SHOWN: usize = 12;
+        let mut rows: Vec<_> = self.0.iter().collect();
+        rows.sort_by(|a, b| b.1.1.cmp(&a.1.1));
         writeln!(
             f,
-            "  {:<20} {:<22} {:>7} {:>14}",
+            "  {:<22} {:<22} {:>7} {:>14}",
             "payer", "reason", "lines", "denied billed"
         )?;
-        for ((payer, reason), (count, money)) in &self.0 {
+        for ((payer, reason), (count, money)) in rows.iter().take(SHOWN) {
             writeln!(
                 f,
-                "  {:<20} {:<22} {:>7} {:>14}",
+                "  {:<22} {:<22} {:>7} {:>14}",
                 payer.as_str(),
                 reason.to_string(),
                 count,
                 money.to_string(),
+            )?;
+        }
+        if rows.len() > SHOWN {
+            let (lines, money) = rows
+                .iter()
+                .skip(SHOWN)
+                .fold((0usize, Money::ZERO), |(lines, money), (_, (count, m))| {
+                    (lines + count, money + *m)
+                });
+            writeln!(
+                f,
+                "  … and {} more (payer, reason) pairs · {} lines · {}",
+                rows.len() - SHOWN,
+                lines,
+                money
             )?;
         }
         Ok(())

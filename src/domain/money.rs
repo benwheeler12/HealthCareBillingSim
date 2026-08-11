@@ -1,4 +1,4 @@
-//! Money is integer cents. Never floats (Decisions #2); reconciliation is
+//! Money is integer cents. Never floats (DESIGN.md Decisions); reconciliation is
 //! exact equality, so the representation must make rounding impossible.
 
 use std::fmt;

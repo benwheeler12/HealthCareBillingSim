@@ -15,7 +15,7 @@ pub struct Summary {
     pub flagged: usize,
     pub non_terminal: usize,
     pub quarantined_remittances: usize,
-    // Money aggregates over billable lines only (Decisions #9).
+    // Money aggregates over billable lines only (DESIGN.md Decisions).
     pub billed: Money,
     pub payer_paid: Money,
     pub patient_responsibility: Money,

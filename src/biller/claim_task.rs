@@ -2,7 +2,7 @@
 //! code. Task completion == terminal state, which is what makes shutdown
 //! trivial. The body is pure shell: every decision comes from `machine::next`.
 //!
-//! Time is computed, not slept (Decisions #23). The task keeps its own local
+//! Time is computed, not slept (DESIGN.md 'Virtual time'). The task keeps its own local
 //! virtual clock and a min-heap of future arrivals declared by the sim; where
 //! the executed implementation raced `recv()` against `sleep_until(deadline)`,
 //! this shell compares the next arrival's timestamp against the deadline —

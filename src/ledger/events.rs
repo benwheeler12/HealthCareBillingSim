@@ -1,6 +1,6 @@
 //! Claim lifecycle events. Every biller component holds a `LedgerTx` clone;
 //! the fold task is the single consumer. The channel is lossless mpsc —
-//! never broadcast (Decisions #10).
+//! never broadcast (DESIGN.md Decisions).
 
 use tokio::sync::mpsc;
 
@@ -38,9 +38,9 @@ pub enum ClaimEvent {
     /// known claim. History note only — epistemically this is silence.
     GarbageRemittance,
     /// Remittance for a claim already terminal. Carries the full remittance:
-    /// on a Resolved claim it is ignored (logged idempotency, Decisions #5);
+    /// on a Resolved claim it is ignored (logged idempotency, DESIGN.md Decisions);
     /// on Flagged(RetriesExhausted), a complete, balanced late answer is
-    /// allowed to transition the claim to Resolved (Decisions #6).
+    /// allowed to transition the claim to Resolved (DESIGN.md Decisions).
     LateRemittance {
         remit: RemittanceAdvice,
     },
@@ -53,7 +53,7 @@ pub struct StampedEvent {
     pub event: ClaimEvent,
 }
 
-/// Sender half of the ledger channel. The caller owns time (Decisions #23):
+/// Sender half of the ledger channel. The caller owns time (DESIGN.md 'Virtual time'):
 /// every emission carries the emitting claim's computed virtual timestamp —
 /// there is no clock to read.
 #[derive(Clone)]

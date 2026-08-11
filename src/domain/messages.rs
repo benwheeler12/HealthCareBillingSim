@@ -1,5 +1,5 @@
 //! Message types crossing the biller ↔ simulation boundary. Time crosses it
-//! as *data* (Decisions #23): the biller declares when it sent a submission;
+//! as *data* (DESIGN.md 'Virtual time'): the biller declares when it sent a submission;
 //! the sim declares when (and whether) each thing comes back. Nobody sleeps.
 
 use crate::domain::claim::{Claim, ClaimId, PayerId};
@@ -9,7 +9,7 @@ use crate::domain::time::VirtualTime;
 
 /// What the clearinghouse actually hands the biller on the return hop.
 /// Fault 3.5 can turn a remittance into unparseable garbage in transit;
-/// epistemically that is silence (Decisions #8) — the timeout machinery owns
+/// epistemically that is silence (DESIGN.md Decisions) — the timeout machinery owns
 /// it — but a correlatable claim_id fragment still earns a history note.
 #[derive(Clone, Debug)]
 pub enum Delivery {
@@ -18,7 +18,7 @@ pub enum Delivery {
 }
 
 /// What actually goes over the wire to the clearinghouse: billable lines only
-/// (Decisions #9), plus the attempt number so transport-fault RNG streams can
+/// (DESIGN.md Decisions), plus the attempt number so transport-fault RNG streams can
 /// give retries fresh fates. The biller's timeout intent is deliberately NOT
 /// on the wire — the claim task owns its deadline and does the comparison;
 /// the payer never learns the biller's patience.
@@ -45,7 +45,7 @@ pub struct Arrival {
     pub delivery: Delivery,
 }
 
-/// The biller-facing face of the simulation (Decisions #23). Lives in
+/// The biller-facing face of the simulation (DESIGN.md 'Virtual time'). Lives in
 /// `domain` so `biller` and `sim` still never import each other: the sim
 /// implements it, the biller holds it as `Arc<dyn Transactor>`. Sync and
 /// `&self` on purpose — calls execute on the calling claim task's worker

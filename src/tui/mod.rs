@@ -16,7 +16,7 @@
 //!
 //! Threading: the TUI event loop owns the main thread on the *wall* clock;
 //! the simulation runs on its own multi-thread runtime behind a spawned
-//! thread (Decisions #23 — time is computed, so claim tasks parallelize).
+//! thread (DESIGN.md 'Virtual time' — time is computed, so claim tasks parallelize).
 //! They meet at two channels: the fold's live-progress watch tap, and a
 //! oneshot carrying the finished `RunOutput`.
 
@@ -71,7 +71,7 @@ pub fn run(mut cfg: RunConfig, opts: TuiOptions) -> anyhow::Result<RunOutput> {
     let (done_tx, done_rx) = mpsc::channel();
     let threads = opts.threads;
     let sim = std::thread::spawn(move || {
-        // Multi-thread runtime (Decisions #23): nothing sleeps, so no paused
+        // Multi-thread runtime (DESIGN.md 'Virtual time'): nothing sleeps, so no paused
         // clock — claim tasks execute in true parallel under the UI.
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         if threads > 0 {
@@ -113,7 +113,8 @@ const PANE_TITLES: [&str; 4] = [
 /// One keys line, everywhere, always — the status box never rewords itself.
 /// Pane-specific instructions live in the hint row of the pane they belong
 /// to, and the full map is one `?` away.
-const KEYS_HINT: &str = "←/→ panes · 1-4 jump · ↑/↓ scroll/select · enter steps down · esc steps up · ? help · ctrl-c quit (prints plain report)";
+const KEYS_HINT: &str =
+    "←/→ panes · ↑/↓ select · enter steps in · esc steps out · ? keys · ctrl-c quit";
 
 struct App {
     banner_rows: Vec<(String, String)>,
@@ -433,7 +434,7 @@ fn draw_running(frame: &mut ratatui::Frame, tabs_area: Rect, content: Rect, app:
         .iter()
         .map(|(label, value)| {
             Line::from(vec![
-                Span::styled(format!(" {label:<20} "), bold()),
+                Span::styled(format!(" {label:<22} "), bold()),
                 Span::raw(value.clone()),
             ])
         })
@@ -534,6 +535,7 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
             Span::raw(action.to_string()),
         ])
     };
+    let note = |text: &str| Line::from(Span::styled(format!("   {text}"), dim()));
     let section = |title: &str| Line::from(Span::styled(format!(" {title}"), theme::accent_bold()));
     let lines = vec![
         section("Everywhere"),
@@ -555,9 +557,11 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
             "into the report: ↑/↓ scroll, ←/→ move the books a day (hold 1s: ×4)",
         ),
         key("esc", "back out to the provider list"),
+        note("buckets shade green → red as receivables age past 90 days"),
         Line::default(),
         section("2 Payer Scorecard"),
         key("↑/↓", "pick a payer; the detail below follows"),
+        note("grades are on the curve: denial rate + response time + paid share"),
         Line::default(),
         section("3 Provider Insights"),
         key(
@@ -572,10 +576,11 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         Line::default(),
         section("4 Timeline"),
         key("↑/↓", "pick a book — the charts re-bucket to its claims"),
+        note("rate charts share one y-scale; the backlog must drain to zero"),
         Line::default(),
         Line::from(Span::styled("   any key closes this card", dim())),
     ];
-    let popup = theme::popup(area, 70, lines.len() as u16 + 2);
+    let popup = theme::popup(area, 74, lines.len() as u16 + 2);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines)

@@ -1,8 +1,9 @@
 # Rationale & Interview Notes
 
-Companion to DESIGN.md. Not auto-loaded — read on demand. Two purposes:
+Companion to DESIGN.md. Not auto-loaded — read on demand. Three purposes:
 (1) full reasoning traces behind decisions, so settled questions aren't relitigated
-without the context that settled them; (2) prep for the live discussion.
+without the context that settled them; (2) how the design evolved from v1 to what
+shipped; (3) prep for the live discussion.
 
 ## Rejected alternatives, with the reasoning that killed them
 
@@ -66,6 +67,48 @@ handled."
 **Fold-at-end pure event log.** Considered (maximally simple, beautifully
 testable); chose fold-as-you-go WITH retained event log — live state enables
 runtime monitoring, retained log keeps replay/audit testability. Both, cheaply.
+
+## Design history (how v1 became what shipped)
+
+**Paused clock → computed time.** v1 ran every delay through `tokio::time` under
+`tokio::time::pause()` + auto-advance, proven first by a spike (kept as
+`tests/virtual_time.rs`). The spike surfaced two real constraints: auto-advance
+only exists on the current-thread runtime (so the whole sim was single-threaded by
+construction), and a `select!` between two timers at the same virtual instant picks
+a branch at random (claim tasks needed `biased;` to keep the determinism claim
+honest). The computed-time model replaced all of it: durations became data — a
+submission declares `sent_at`, the sim answers with every delivery that attempt
+will ever produce, stamped with computed arrival times, and the
+`select!(response, deadline)` race became `min(next_arrival, deadline)` — the same
+decision, as arithmetic. `machine::next` was untouched; it never knew where `now`
+came from. That deleted the runtime constraint (true parallelism on the stock
+scheduler, event log identical at any thread count), turned the clearinghouse into
+a sync `Transactor` call, and shrank the remittance dispatcher to a quarantine
+clerk. Old and new binaries produced byte-identical reports on the same seed
+(benchmarked in BENCHMARKS.MD). The trade, honestly named: the timeout is now an
+explicit comparison, not an executed race — "silence is the failure" lives in a
+formula instead of a sleeping task.
+
+**Dispatcher → quarantine clerk.** v1's remittance dispatcher (routing map,
+per-claim channels) existed so correlation-by-ID was a real, testable mechanism.
+Under computed time the routing disappeared into the transaction reply, and what
+remained of the component is the part that still carries meaning: deliveries that
+correlate to no known claim land in quarantine (fault 3.2).
+
+**TUI: seven panes → four.** The UI grew iteratively: reports-as-panes first, then
+a reshape around insight order. The seven-pane layout had two thin text-dump
+screens (Overview, Diagnostic) and two near-duplicates (Scorecard, Denials); it
+converged on four money-first panes with one visual language, every report pane
+scrollable by provider. Tried and cut, each for terminal-resolution readability:
+four overlaid timeline series (small multiples won), a ghosted reference line, the
+standalone Overview pane (its content moved into A/R Aging and the startup
+banner). A late scope-mismatch fix made each pane derive every number from one
+moment (A/R Aging as-of a scrubbable day; Provider Insights over the drained final
+books), which is also when the timeline scrubber and hold-to-fast-forward arrived.
+Navigation converged last: Tab dropped out of the grammar entirely — arrows,
+Enter (step down a layer), and Esc (step back up) are the whole vocabulary, and
+Ctrl-C became the only exit so backing out of a deep layer can never quit by
+accident.
 
 ## Framings worth saying out loud in the discussion
 

@@ -2,7 +2,7 @@
 //! The gap between the two is the biller's blind spot — and the correctness
 //! oracle in tests.
 //!
-//! Deliberate deviation from "reports depend only on ledger" (Decisions #16):
+//! Deliberate deviation from "reports depend only on ledger" (DESIGN.md Decisions):
 //! this report's entire point is comparing the two views, so it alone may
 //! import sim-truth. The protected invariant — sim-truth never leaking INTO
 //! the ledger — is untouched.
