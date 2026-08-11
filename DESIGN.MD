@@ -469,7 +469,10 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     never send key-up — shifts to four days per step after a second, wearing
     a ×4 badge that decays once the repeats stop (enhanced-protocol
     terminals report auto-repeat as Repeat events, so the event loop now
-    drops only Releases).
+    drops only Releases). Tab then dropped out of the grammar entirely —
+    arrows, Enter, and Esc are the whole vocabulary: on the aging pane
+    Enter steps into the report window, where ↑/↓ scroll the document and
+    ←/→ drive the scrubber, and Esc steps back out to the provider list.
 
 ## Module layout
 

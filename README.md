@@ -60,15 +60,15 @@ first, then each billing organization by open payer A/R) drives the
 report on the right — the outcome bars up top (a claims funnel and a
 money waterfall as proportional bars) over the aging tables, buckets
 colored green → red with a per-payer mix bar, every number derived from
-the same as-of snapshot and recomputed for whichever book is selected;
-Tab hops focus so ↑/↓ can either change the provider or scroll the
-report. Enter grabs the **timeline scrubber**, pinned at the bottom of
-the report window: ←/→ then move the as-of moment a virtual day at a
-time across the whole run (hold an arrow for a second and the scrub
-fast-forwards to four days per step, with a ×4 badge) — the books are
-replayed from the event log to that day, so the bars, tables, and
-provider list all animate through time — and Esc hands the arrows back
-to the pane bar. The **Payer Scorecard
+the same as-of snapshot and recomputed for whichever book is selected.
+Enter steps into the report window, where ↑/↓ scroll the report and
+←/→ drive the **timeline scrubber** pinned at its bottom, moving the
+as-of moment a virtual day at a time across the whole run (hold an
+arrow for a second and the scrub fast-forwards to four days per step,
+with a ×4 badge) — the books are replayed from the event log to that
+day, so the bars, tables, and provider list all animate through time —
+and Esc steps back out to the provider list, handing ←/→ back to the
+pane bar. The **Payer Scorecard
 pane** merges the scorecard and denial reports into a league table
 graded on the curve (A–F from denial rate, response time, and paid
 share, best to worst, with inline bars); ↑/↓ picks a payer and two stat

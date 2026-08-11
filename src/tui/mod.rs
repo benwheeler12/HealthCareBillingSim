@@ -269,10 +269,9 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Down => done.timeline.move_selection(1, &done.output),
         KeyCode::PageUp => done.timeline.move_selection(-10, &done.output),
         KeyCode::PageDown => done.timeline.move_selection(10, &done.output),
-        KeyCode::Tab if app.pane == AGING => done.aging.toggle_focus(),
         // Enter steps down a layer; Esc steps back up, stopping at the pane
         // bar (it never quits — that's Ctrl-C's job alone).
-        KeyCode::Enter if app.pane == AGING => done.aging.enter_timeline(),
+        KeyCode::Enter if app.pane == AGING => done.aging.enter_report(),
         KeyCode::Esc if app.pane == AGING => {
             done.aging.escape();
         }
@@ -553,9 +552,9 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         key("↑/↓", "pick a book — all providers first, then each one"),
         key(
             "enter",
-            "grab the timeline: ←/→ move the books a day (hold 1s: ×4), esc lets go",
+            "into the report: ↑/↓ scroll, ←/→ move the books a day (hold 1s: ×4)",
         ),
-        key("tab", "hop over to scroll the report"),
+        key("esc", "back out to the provider list"),
         Line::default(),
         section("2 Payer Scorecard"),
         key("↑/↓", "pick a payer; the detail below follows"),
