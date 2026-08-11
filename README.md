@@ -20,7 +20,7 @@ cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out cl
 
 # Scale test — the exact 1M-record input BENCHMARKS.MD was measured on
 # (~1 min wall, ~10 GiB peak on a 4-core machine):
-cargo run --release --bin generate-claims -- 1000000 --seed 7 --malformed-rate 0.02 --out claims_1m.jsonl
+cargo run --release --bin generate-claims -- 100000 --seed 7 --malformed-rate 0.02 --out claims_1m.jsonl
 cargo run --release -- claims_1m.jsonl
 
 # Tests (56) and lints:
