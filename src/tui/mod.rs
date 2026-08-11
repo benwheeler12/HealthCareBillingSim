@@ -9,10 +9,10 @@
 //! every pane scrollable by provider:
 //!   1 A/R Aging            outcome bars + aging books as of one moment,
 //!                          scrubbable a day at a time across the run
-//!   2 Payer Scorecard      graded payers + denial detail (scorecard ∪ denials)
-//!   3 Provider Insights    per-provider A/R analysis over the drained final
+//!   2 Provider Insights    per-provider A/R analysis over the drained final
 //!                          books — what's still open, and what to chase first
-//!   4 Timeline             the run replayed as rate + backlog charts, per book
+//!   3 Timeline             the run replayed as rate + backlog charts, per book
+//!   4 Payer Scorecard      graded payers + denial detail (scorecard ∪ denials)
 //!
 //! Threading: the TUI event loop owns the main thread on the *wall* clock;
 //! the simulation runs on its own multi-thread runtime behind a spawned
@@ -98,14 +98,14 @@ pub fn run(mut cfg: RunConfig, opts: TuiOptions) -> anyhow::Result<RunOutput> {
 }
 
 const AGING: usize = 0;
-const PAYERS: usize = 1;
-const PROVIDERS: usize = 2;
-// Pane 3, Timeline, is the draw dispatch's wildcard arm.
+const PROVIDERS: usize = 1;
+const PAYERS: usize = 3;
+// Pane 2, Timeline, is the draw dispatch's wildcard arm.
 const PANE_TITLES: [&str; 4] = [
     "A/R Aging",
-    "Payer Scorecard",
     "Provider Insights",
     "Timeline",
+    "Payer Scorecard",
 ];
 
 /// One keys line, everywhere, always — the status box never rewords itself.
@@ -491,19 +491,19 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         key("esc", "back out to the provider list"),
         note("buckets shade green → red as receivables age past 90 days"),
         Line::default(),
-        section("2 Payer Scorecard"),
-        key("↑/↓", "pick a payer; the detail below follows"),
-        note("grades are on the curve: denial rate + response time + paid share"),
-        Line::default(),
-        section("3 Provider Insights"),
+        section("2 Provider Insights"),
         key("↑/↓", "pick a provider; the analysis follows"),
         key("enter", "into the analysis document; ↑/↓ scroll it"),
         key("esc", "back up to the provider list"),
         note("every figure computed from the drained final books — nothing generated"),
         Line::default(),
-        section("4 Timeline"),
+        section("3 Timeline"),
         key("↑/↓", "pick a book — the charts re-bucket to its claims"),
         note("rate charts share one y-scale; the backlog must drain to zero"),
+        Line::default(),
+        section("4 Payer Scorecard"),
+        key("↑/↓", "pick a payer; the detail below follows"),
+        note("grades are on the curve: denial rate + response time + paid share"),
         Line::default(),
         Line::from(Span::styled("   any key closes this card", dim())),
     ];
@@ -614,9 +614,9 @@ mod render_tests {
         let mut app = done_app();
         let markers = [
             "A/R Aging — all providers",
-            "Configured —",
             "Providers —",
             "Backlog",
+            "Configured —",
         ];
         for (pane, marker) in markers.iter().enumerate() {
             app.pane = pane;
@@ -665,7 +665,7 @@ mod render_tests {
         );
 
         // The timeline pane re-buckets its charts for a single provider.
-        app.pane = 3;
+        app.pane = 2;
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         let selected = app
             .done
@@ -695,16 +695,18 @@ mod render_tests {
     #[test]
     fn keys_route_between_panes_and_quit() {
         let mut app = done_app();
-        handle_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('4'), KeyModifiers::NONE);
         assert_eq!(app.pane, PAYERS);
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(
             app.done.as_ref().expect("done").payers.table.selected(),
             Some(1)
         );
+        // Right from the last pane wraps around to the first.
         handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.pane, AGING);
+        handle_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(app.pane, PROVIDERS);
-        handle_key(&mut app, KeyCode::Char('3'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
         // Neither q nor Esc terminates anymore — only Ctrl-C does.
         assert!(!handle_key(
@@ -844,9 +846,9 @@ mod frame_dump {
         }
         dump(&mut app, &dir, "pane0-scrubbed");
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        app.pane = 3;
+        app.pane = 2;
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        dump(&mut app, &dir, "pane3-provider");
+        dump(&mut app, &dir, "pane2-provider");
         app.help = true;
         dump(&mut app, &dir, "help");
         app.help = false;

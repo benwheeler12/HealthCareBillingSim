@@ -230,7 +230,7 @@ Class 4 — reclassified as **architectural invariants**, not faults:
 ## Terminal experience
 
 On a real terminal the run opens an interactive TUI (ratatui): four panes ordered
-money-first (A/R Aging · Payer Scorecard · Provider Insights · Timeline) on a
+money-first (A/R Aging · Provider Insights · Timeline · Payer Scorecard) on a
 numbered tab bar. Conventions, settled deliberately:
 
 - **Layered navigation, three keys**: arrows move, Enter steps down a layer

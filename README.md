@@ -35,13 +35,14 @@ line (schema in `docs/TAKE_HOME_PROMPT.MD`).
 
 On a real terminal, a run opens an interactive UI: four panes, money views
 first — **A/R Aging** (the books as of a scrubbable virtual day: outcome bars,
-colored aging tables, per-provider), **Payer Scorecard** (payers graded A–F,
-with the configured personality next to what the scorecard rediscovered from
-remittance data alone), **Provider Insights** (a per-provider A/R analysis in
-plain English — where the money is stuck, what the open claims are doing,
-payer signals, the top chase items by risk, and recommended actions, every
-figure computed from the ledger), and **Timeline** (per-day claim flow and the
-in-flight backlog draining to zero — the correctness guarantee as a picture).
+colored aging tables, per-provider), **Provider Insights** (a per-provider A/R
+analysis in plain English — where the money is stuck, what the open claims are
+doing, payer signals, the top chase items by risk, and recommended actions,
+every figure computed from the ledger), **Timeline** (per-day claim flow and
+the in-flight backlog draining to zero — the correctness guarantee as a
+picture), and **Payer Scorecard** (payers graded A–F, with the configured
+personality next to what the scorecard rediscovered from remittance data
+alone).
 
 The whole key grammar: **←/→** move between panes, **↑/↓** select, **Enter**
 steps down a layer, **Esc** steps back up, **`?`** shows the full keyboard map,
