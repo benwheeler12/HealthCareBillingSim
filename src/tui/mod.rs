@@ -1,12 +1,17 @@
-//! Interactive terminal UI: five panes on a numbered tab bar (←/→ or 1-5 to
-//! move), a live status box pinned to the bottom, a `?` help overlay, and
-//! Enter on a claim drilling into its full audit trail.
+//! Interactive terminal UI: four panes on a numbered tab bar (←/→ or 1-4 to
+//! move), a live status box pinned to the bottom, and a `?` help overlay.
+//! Navigation is layered: Enter steps down (into a provider's claims, a
+//! claim's audit trail, or the A/R timeline scrubber), Esc steps back up —
+//! the top layer being the pane bar — and Ctrl-C is the only way out of the
+//! program (the plain report prints on the way).
 //!
 //! Pane map — the reports arranged as one instrument, money views first,
 //! every pane scrollable by provider:
-//!   1 A/R Aging            per-provider outcome bars + aging books
+//!   1 A/R Aging            outcome bars + aging books as of one moment,
+//!                          scrubbable a day at a time across the run
 //!   2 Payer Scorecard      graded payers + denial detail (scorecard ∪ denials)
-//!   3 Provider Insights    master–detail chase list with sortable claims
+//!   3 Provider Insights    master–detail chase list over the drained final
+//!                          books — what's still open at run completion
 //!   4 Timeline             the run replayed as rate + backlog charts, per book
 //!
 //! Threading: the TUI event loop owns the main thread on the *wall* clock;
@@ -108,7 +113,7 @@ const PANE_TITLES: [&str; 4] = [
 /// One keys line, everywhere, always — the status box never rewords itself.
 /// Pane-specific instructions live in the hint row of the pane they belong
 /// to, and the full map is one `?` away.
-const KEYS_HINT: &str = "←/→ panes · 1-4 jump · ↑/↓ scroll/select · enter drill in · ? help · q quit (prints plain report)";
+const KEYS_HINT: &str = "←/→ panes · 1-4 jump · ↑/↓ scroll/select · enter steps down · esc steps up · ? help · ctrl-c quit (prints plain report)";
 
 struct App {
     banner_rows: Vec<(String, String)>,
@@ -197,19 +202,16 @@ fn event_loop(
 }
 
 /// Apply one keypress; returns true when the user asked to leave the UI.
+/// Only Ctrl-C quits — Enter steps down a layer, Esc steps back up, and at
+/// the top layer (the pane bar) Esc is a no-op.
 fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
-    // Ctrl-C always leaves, overlays or not.
+    // Ctrl-C always leaves, overlays or not — and nothing else does.
     if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
         return true;
     }
-    // The help overlay swallows everything: any of these close it, nothing quits.
+    // The help overlay swallows everything: any key closes it, nothing quits.
     if app.help {
-        if matches!(
-            code,
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')
-        ) {
-            app.help = false;
-        }
+        app.help = false;
         return false;
     }
     if code == KeyCode::Char('?') {
@@ -217,13 +219,14 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         return false;
     }
     let Some(done) = &mut app.done else {
-        return code == KeyCode::Char('q') || code == KeyCode::Esc;
+        return false;
     };
 
-    // The claim overlay: esc/enter/q close, ↑/↓ scroll the audit trail.
+    // The claim overlay — the deepest layer: esc steps back up to the claims
+    // list, ↑/↓ scroll the audit trail.
     if let Some(detail) = &mut done.detail {
         match code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => done.detail = None,
+            KeyCode::Esc => done.detail = None,
             KeyCode::Up => detail.scroll = detail.scroll.saturating_sub(1),
             KeyCode::Down => detail.scroll = detail.scroll.saturating_add(1),
             KeyCode::PageUp => detail.scroll = detail.scroll.saturating_sub(10),
@@ -235,7 +238,14 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
 
     let panes = PANE_TITLES.len();
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => return true,
+        // While the A/R timeline is grabbed, ←/→ scrub the as-of day; the
+        // pane bar gets them back when Esc lets go.
+        KeyCode::Left if app.pane == AGING && done.aging.timeline_grabbed() => {
+            done.aging.step_day(-1, &done.output)
+        }
+        KeyCode::Right if app.pane == AGING && done.aging.timeline_grabbed() => {
+            done.aging.step_day(1, &done.output)
+        }
         KeyCode::Left => app.pane = (app.pane + panes - 1) % panes,
         KeyCode::Right => app.pane = (app.pane + 1) % panes,
         KeyCode::Char(c @ '1'..='4') => app.pane = c as usize - '1' as usize,
@@ -255,12 +265,20 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Down => done.timeline.move_selection(1, &done.output),
         KeyCode::PageUp => done.timeline.move_selection(-10, &done.output),
         KeyCode::PageDown => done.timeline.move_selection(10, &done.output),
-        KeyCode::Tab if app.pane == PROVIDERS => done.insights.toggle_focus(),
         KeyCode::Tab if app.pane == AGING => done.aging.toggle_focus(),
+        // Enter steps down a layer; Esc steps back up, stopping at the pane
+        // bar (it never quits — that's Ctrl-C's job alone).
+        KeyCode::Enter if app.pane == AGING => done.aging.enter_timeline(),
+        KeyCode::Esc if app.pane == AGING => {
+            done.aging.escape();
+        }
+        KeyCode::Esc if app.pane == PROVIDERS => {
+            done.insights.escape();
+        }
         KeyCode::Enter if app.pane == PROVIDERS => match done.insights.focus {
-            // Enter on a provider steps into their claims.
+            // Enter on a provider steps down into their claims.
             insights::Focus::Providers => done.insights.focus = insights::Focus::Claims,
-            // Enter on a claim opens the full breakdown.
+            // Enter on a claim steps down again: the full breakdown.
             insights::Focus::Claims => {
                 let selected = done
                     .insights
@@ -327,8 +345,11 @@ impl Done {
         payer_configs: HashMap<PayerId, PayerConfig>,
         payer_routes: HashMap<PayerId, FaultProfile>,
     ) -> Done {
-        let (books, as_of) = (&output.intake_ledger, output.intake_finished_at);
-        let chase = chase_list(books, as_of, usize::MAX);
+        // The chase list feeds Provider Insights, which reads the drained
+        // final books: what's still open at run completion is exactly the
+        // pile a human has to work. (The A/R Aging pane keeps its own as-of
+        // snapshot — mid-flight by default, scrubbable across the run.)
+        let chase = chase_list(&output.ledger, output.finished_at, usize::MAX);
         let timeline = timeline::build(&output);
         let payers = payers::build(&output, payer_configs, payer_routes);
         let aging = aging::build(&output);
@@ -371,7 +392,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
             frame.render_widget(tabs, tabs_area);
 
             match app.pane {
-                AGING => aging::draw(frame, content, &mut done.aging),
+                AGING => aging::draw(frame, content, &mut done.aging, &done.output),
                 PAYERS => payers::draw(frame, content, &mut done.payers),
                 PROVIDERS => insights::draw(frame, content, &mut done.insights, &done.chase),
                 _ => timeline::draw(frame, content, &mut done.timeline),
@@ -517,23 +538,34 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         key("1-4", "jump straight to a pane"),
         key("↑/↓", "scroll, or move the selection"),
         key("pgup/pgdn", "the same, ten at a time"),
-        key("enter", "drill into the selected row"),
-        key("q / esc", "quit — the plain report prints to stdout"),
+        key("enter", "step down a layer — select, grab, drill in"),
+        key(
+            "esc",
+            "step back up a layer — the top layer is the pane bar",
+        ),
+        key("ctrl-c", "quit — the plain report prints to stdout"),
         Line::default(),
         section("1 A/R Aging"),
         key("↑/↓", "pick a book — all providers first, then each one"),
+        key(
+            "enter",
+            "grab the timeline: ←/→ move the books a day, esc lets go",
+        ),
         key("tab", "hop over to scroll the report"),
         Line::default(),
         section("2 Payer Scorecard"),
         key("↑/↓", "pick a payer; the detail below follows"),
         Line::default(),
         section("3 Provider Insights"),
-        key("tab / enter", "hop between providers and their claims"),
+        key(
+            "enter",
+            "into the provider's claims; on a claim, its audit trail",
+        ),
+        key("esc", "back up: audit trail → claims → providers"),
         key(
             "c / a / r",
             "sort claims by cost / age / risk (again to flip)",
         ),
-        key("enter", "on a claim: its full audit trail"),
         Line::default(),
         section("4 Timeline"),
         key("↑/↓", "pick a book — the charts re-bucket to its claims"),
@@ -932,13 +964,16 @@ mod render_tests {
         assert!(render(&mut app).contains("keyboard map"));
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
-        // Drill into the top claim on the providers pane.
+        // Drill into the top claim on the providers pane: Enter steps down
+        // into the claims, Enter again opens the audit trail.
         app.pane = PROVIDERS;
-        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         let text = render(&mut app);
         assert!(text.contains("claim audit trail"), "no overlay:\n{text}");
         assert!(text.contains("event history"));
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        // Esc steps the rest of the way back up: claims → providers.
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
         // The aging pane re-derives its report — outcome bars included —
@@ -1005,7 +1040,65 @@ mod render_tests {
         assert_eq!(app.pane, PROVIDERS);
         handle_key(&mut app, KeyCode::Char('3'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE));
+        // Neither q nor Esc terminates anymore — only Ctrl-C does.
+        assert!(!handle_key(
+            &mut app,
+            KeyCode::Char('q'),
+            KeyModifiers::NONE
+        ));
+        assert!(!handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE));
+        assert!(handle_key(
+            &mut app,
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        ));
+    }
+
+    #[test]
+    fn enter_grabs_the_aging_timeline_and_esc_lets_go() {
+        let mut app = done_app();
+        app.pane = AGING;
+        let grabbed = |app: &App| app.done.as_ref().expect("done").aging.timeline_grabbed();
+
+        // Enter grabs the timeline: ←/→ scrub the as-of day, not the panes.
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(grabbed(&app));
+        handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.pane, AGING, "← must scrub the day, not switch panes");
+        let text = render(&mut app);
+        assert!(text.contains("timeline"), "no scrubber row:\n{text}");
+        assert!(
+            text.contains("books as of"),
+            "report must carry its as-of moment:\n{text}"
+        );
+
+        // Esc lets go; the arrows control the pane bar again.
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!grabbed(&app));
+        handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.pane, PANE_TITLES.len() - 1);
+    }
+
+    #[test]
+    fn insights_enter_steps_down_and_esc_steps_up() {
+        let mut app = done_app();
+        app.pane = PROVIDERS;
+        let focus = |app: &App| app.done.as_ref().expect("done").insights.focus;
+
+        assert!(matches!(focus(&app), insights::Focus::Providers));
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(focus(&app), insights::Focus::Claims));
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.done.as_ref().expect("done").detail.is_some());
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.done.as_ref().expect("done").detail.is_none());
+        assert!(matches!(focus(&app), insights::Focus::Claims));
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(focus(&app), insights::Focus::Providers));
+        // At the top layer Esc is a no-op — it must never terminate.
+        assert!(!handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(focus(&app), insights::Focus::Providers));
     }
 }
 
@@ -1073,6 +1166,14 @@ mod frame_dump {
         app.pane = AGING;
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         dump(&mut app, &dir, "pane0-provider");
+        // The aging books scrubbed 60 days back from the end of intake.
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        for _ in 0..60 {
+            handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        }
+        dump(&mut app, &dir, "pane0-scrubbed");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         app.pane = 3;
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
         dump(&mut app, &dir, "pane3-provider");
@@ -1080,7 +1181,7 @@ mod frame_dump {
         dump(&mut app, &dir, "help");
         app.help = false;
         app.pane = PROVIDERS;
-        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         dump(&mut app, &dir, "detail");
     }

@@ -438,6 +438,32 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     renders `status_label` verbatim, and the audit-trail overlay's decoder
     paragraphs are word-wrapped, styled lines under the same theme.
 
+27. **One moment per pane, layered navigation, Ctrl-C the only exit.** The
+    A/R Aging pane had a scope mismatch: its outcome bars summarized the
+    drained final books while the aging tables below them read the intake
+    snapshot. Fixed by making the pane a view of the books **as of one
+    moment** — provider list, outcome bars, and aging tables all derive
+    from the same snapshot (the end of intake by default), so the claims
+    funnel gained an honest "in flight" segment and the money waterfall an
+    "outstanding (unanswered)" one. That single as-of moment then made a
+    timeline natural: `snapshot_at` (extracted from `finalize` — the same
+    per-claim parallel replay of each claim's own history) rebuilds the
+    books at any virtual time, and Enter on the pane grabs a scrubber so
+    ←/→ move the as-of day across the whole run, Esc handing the arrows
+    back to the pane bar. The provider roster spans the whole run in a
+    fixed order (ranked at the default view) so scrubbing animates the
+    numbers under a steady cursor. Provider Insights swung the other way:
+    it now reads the drained final books (`chase_list` at run completion)
+    — what is still open when every claim is terminal is exactly the
+    human-review pile, complementing the aging pane's mid-flight view
+    instead of duplicating it. Navigation converged on one layered
+    convention, spelled out in every hint row and the `?` map: Enter
+    steps down a layer (provider → claims → audit trail; aging → the
+    timeline), Esc steps back up with the pane bar as the top layer — and
+    Esc/q no longer terminate anywhere. Ctrl-C is the only way out (the
+    plain report still prints on exit), so stepping out of a deep layer
+    can never quit the program by accident.
+
 ## Module layout
 
 ```
