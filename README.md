@@ -3,13 +3,11 @@
 Rust + Tokio simulation of the healthcare billing lifecycle — biller ↔
 clearinghouse ↔ insurance payers — built for the Brace Health take-home.
 
-The clearinghouse + payers are a deliberately unreliable, seedable,
-**memoryless** adversary (pure functions of seed + config). The biller is the
-system under test and holds all the state. Correctness has one definition:
-**every ingested claim reaches a correct terminal state** — Resolved,
-Rejected, or Flagged — with no claim lost, stuck, or double-counted, under
-any seeded fault schedule. The fault table in [DESIGN.MD](DESIGN.MD) is the
-spec, the test matrix, and (deliberately) the git history.
+The clearinghouse + payers are a deliberately unreliable, seedable, memoryless
+adversary; the biller is the system under test. Correctness has one definition:
+**every ingested claim reaches a correct terminal state** — Resolved, Rejected,
+or Flagged — with no claim lost, stuck, or double-counted, under any seeded
+fault schedule.
 
 ## Quickstart
 
@@ -20,9 +18,8 @@ cargo run -- data/sample_claims_10k.jsonl
 # Roll your own input at any size:
 cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out claims.jsonl
 
-# Scale test — mint the exact 1M-record input the numbers in BENCHMARKS.MD
-# were measured on (~10s to generate), then run it. Expect roughly a minute
-# of wall time and ~10 GiB peak memory on a 4-core machine:
+# Scale test — the exact 1M-record input BENCHMARKS.MD was measured on
+# (~1 min wall, ~10 GiB peak on a 4-core machine):
 cargo run --release --bin generate-claims -- 1000000 --seed 7 --malformed-rate 0.02 --out claims_1m.jsonl
 cargo run --release -- claims_1m.jsonl
 
@@ -31,109 +28,41 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-## CLI
+The input file is the only required argument: one PayerClaim JSON object per
+line (schema in `docs/TAKE_HOME_PROMPT.MD`).
 
-On a real terminal, runs open an **interactive UI**: four panes on a
-numbered tab bar, money views first — ←/→ (or 1–4) to move between
-**A/R Aging**, **Payer Scorecard**, **Provider Insights**, and
-**Timeline**; ↑/↓ scrolls (or selects rows in the focused list), `?`
-opens a keyboard map, and each pane carries its own hint row at the top
-while the status box at the bottom never changes its text. Navigation is
-layered: **Enter steps down** into the next layer of the UI (a
-provider's claims, a claim's audit trail, the aging timeline) and
-**Esc steps back up**, the top layer being the pane bar itself. Every
-report pane is scrollable by provider. The run opens on the **A/R Aging
-pane**, a master–detail view of the books **as of one moment in virtual
-time** (the end of intake by default — the mid-flight view a biller
-actually lives in): a provider list on the left (the whole portfolio
-first, then each billing organization by open payer A/R) drives the
-report on the right — the outcome bars up top (a claims funnel and a
-money waterfall as proportional bars) over the aging tables, buckets
-colored green → red with a per-payer mix bar, every number derived from
-the same as-of snapshot and recomputed for whichever book is selected.
-Enter steps into the report window, where ↑/↓ scroll the report and
-←/→ drive the **timeline scrubber** pinned at its bottom, moving the
-as-of moment a virtual day at a time across the whole run (hold an
-arrow for a second and the scrub fast-forwards to four days per step,
-with a ×4 badge) — the books are replayed from the event log to that
-day, so the bars, tables, and provider list all animate through time —
-and Esc steps back out to the provider list, handing ←/→ back to the
-pane bar. The **Payer Scorecard
-pane** merges the scorecard and denial reports into a league table
-graded on the curve (A–F from denial rate, response time, and paid
-share, best to worst, with inline bars); ↑/↓ picks a payer and two stat
-tables below — **Configured** and **Observed** — put the personality the
-simulation assigned next to what the scorecard rediscovered from
-remittance data alone, above that payer's denial breakdown by reason.
-The **Timeline pane charts the run**, per book: the same provider list
-drives a 2×2 grid of small multiples — per-virtual-day rates for
-ingested, submitted, remitted, and settled on one shared scale, so
-submitted riding above ingested reads as retry traffic (the fault
-injection made visible) — over a chart of the in-flight backlog, which
-rises through intake and drains to zero: the correctness guarantee as a
-picture, replayed from the retained event log and re-bucketed for
-whichever organization is selected (every timeline shares the
-portfolio's x-axis, so shapes stay comparable). The **Provider Insights
-pane** is a master–detail view over the **drained final books** — what
-is still open when the run completes is exactly the pile a human has to
-work: scroll a list of billing organizations (sorted by total
-outstanding at run end) and the panel beside it live-updates with that
-provider's open claims — outstanding, age, and a risk score (dollars ×
-days stuck), sortable by **c**ost, **a**ge, or **r**isk in either
-direction (press the key again to flip). Statuses are plain English,
-derived from the claim's evidence — "awaiting 1st response", "retrying
-(attempt 3)", "partial remit (2/4 lines)", "flagged: doesn't sum (short
-$0.83)", "flagged: no response, gave up". Enter on a provider steps
-down into their claims; **Enter on a claim opens its full audit
-trail** — every event with virtual timestamps, straight from the
-event-sourced ledger, plus a what-this-means paragraph explaining the
-claim's status in simulation terms (why silence is ambiguous, why
-disputed figures are never booked) — and Esc steps back up a layer at a
-time. A live status
-box pinned to the bottom shows claims/resolved/rejected/flagged, the
-virtual clock, and wall time (plus a drain gauge while the run is in
-flight). Ctrl-C is the only way to quit; on the way out the plain
-report prints so a record stays in your
-scrollback. When stdout is not a terminal (pipes, CI) or with `--no-tui`,
-output is the plain sequential report — that path still prints every
-report, including the full configuration banner, the standalone denial
-breakdown, and the sim-truth diagnostic (the god's-eye injected-faults
-view lives only there).
+## The TUI
 
-The input file is the single required argument (one PayerClaim JSON object
-per line; schema in `docs/TAKE_HOME_PROMPT.MD`). Everything else is an
-optional flag with a sensible default, and every run starts by printing the
-full parameter set it actually used — seed, rate, retry policy, fault rates,
-payer personalities, and where each value came from.
+On a real terminal, a run opens an interactive UI: four panes, money views
+first — **A/R Aging** (the books as of a scrubbable virtual day: outcome bars,
+colored aging tables, per-provider), **Payer Scorecard** (payers graded A–F,
+with the configured personality next to what the scorecard rediscovered from
+remittance data alone), **Provider Insights** (the open claims a human would
+have to work at run end, with plain-English statuses and per-claim audit
+trails), and **Timeline** (per-day claim flow and the in-flight backlog
+draining to zero — the correctness guarantee as a picture).
 
-Configuration layers, later wins: **defaults → `--preset` →
-`--fault-profile` file → individual flags.**
+The whole key grammar: **←/→** move between panes, **↑/↓** select, **Enter**
+steps down a layer, **Esc** steps back up, **`?`** shows the full keyboard map,
+and **Ctrl-C** quits — printing the plain report so a record stays in your
+scrollback. When stdout is not a terminal (pipes, CI) or with `--no-tui`, you
+get the plain sequential report instead; that path also prints the sim-truth
+diagnostic — the god's-eye view of injected faults.
 
-- `--preset honest|messy|chaos` — **defaults to `messy`** (drops, duplicates,
-  delays: the assessment's "bake in a little unreliability"), with per-route
-  personalities: a lossy, slow anthem; a clean but occasionally lying
-  medicare; humana shedding individual service lines (partial remits);
-  cigna garbling remittances and claim_ids. `honest` is the lossless
-  baseline; `chaos` is everything at once with a slow, denial-happy anthem.
-- `--fault-profile FILE` — scenario JSON for precise control
-  (`data/demo_scenario.json` is a template; unknown fields are rejected).
-- Individual knobs: `--forward-drop-rate`, `--return-drop-rate`,
-  `--duplicate-rate`, `--delay-rate`, `--max-delay-secs`,
-  `--dishonest-rate`, `--line-drop-rate`, `--corrupt-id-rate`,
-  `--garbage-rate`, `--max-attempts`, `--timeout-secs`, `--backoff-secs`.
+## Configuration
+
+Every run starts by printing the full parameter set it actually used.
+Layers, later wins: **defaults → `--preset` → `--fault-profile` file →
+individual flags** (see `cargo run -- --help` for the full set).
+
+- `--preset honest|messy|chaos` — defaults to `messy` (drops, duplicates,
+  delays, and per-payer route personalities); `honest` is the lossless
+  baseline; `chaos` is everything at once.
+- `--fault-profile FILE` — scenario JSON for precise control, including
+  per-payer fault profiles (`data/demo_scenario.json` is a template).
 - `--seed` reproduces outcomes exactly; `--rate` is claims per *virtual*
-  second — the default (0.0004, one claim every ~42 virtual minutes) spreads
-  the 10k sample across ~9.5 virtual months so receivables genuinely age;
-  `--chase` sizes the outstanding-receivables list.
-- Scenario files and presets can set **per-payer fault profiles** (a payer
-  entry's `faults` section) — different clearinghouse routes fail
-  differently, which is what gives each payer its own aging profile.
-- Long runs show a live progress line (claims/resolved/flagged + the virtual
-  clock) on stderr; disable with `--no-progress`. Colors follow the terminal
-  and `NO_COLOR`; force off with `--no-color`. Reports go to stdout, logs to
-  stderr (`RUST_LOG=healthcare_billing_sim=debug` for the per-claim story).
-- `cargo run -- --help` is grouped by Simulation / Fault injection / Retry
-  policy / Output.
+  second — the default spreads the 10k sample across ~9.5 virtual months so
+  receivables genuinely age.
 
 ## Architecture in one screen
 
@@ -153,156 +82,45 @@ input file ──▶ ingest (parallel validate, computed arrival times, dedup)
               (uncorrelatable deliveries)             (ground truth oracle)
 ```
 
-- **Claim tasks** own the whole lifecycle as linear async code: submit,
-  compare next-declared-arrival vs deadline, bounded retry with backoff,
-  reconcile, emit terminal event, return. Task completion == terminal
-  state, so **shutdown is structural**: input exhausted + tasks drained ⇒
-  channels close in dependency order ⇒ fold returns ⇒ reports print ⇒
-  exit. No shutdown signals anywhere.
-- **Functional core, imperative shell**: every lifecycle decision is the pure
-  `machine::next(state, event, claim, policy, now) → (state, actions)`;
-  adjudication and reconciliation are pure functions. The async fns only
-  move messages and do arithmetic — nothing sleeps.
-- **Two ledgers**: the biller's-knowledge ledger (only what remittances
-  revealed) vs the sim-truth recorder (every fault actually injected). The
-  gap is the biller's blind spot; sim-truth is the oracle in every fault test
-  and powers the god's-eye diagnostic report.
-- `sim/` and `biller/` never import each other — shared types live in
-  `domain/`. One documented exception: the diagnostic report reads sim-truth,
-  because comparing the views is its purpose (Decisions #16).
+The properties that make it work — each one section in
+[DESIGN.MD](DESIGN.MD):
 
-## Virtual time
+- **Structural shutdown**: claim tasks own the whole lifecycle; task completion
+  == terminal state, so input exhausted + tasks drained ⇒ reports ⇒ exit. No
+  shutdown signals anywhere.
+- **Virtual time is computed, not slept**: durations cross the biller ↔ sim
+  boundary as data, timeouts are arithmetic, silence is the failure — and
+  because nothing sleeps, claim tasks run in true parallel with a
+  byte-identical event log at any thread count.
+- **Outcome-deterministic given a seed**: no shared RNG; every decision draws
+  from a keyed stream. Retries reroll transport luck; re-delivered claims
+  reproduce identical remittances (idempotency by derivation).
+- **Money is integer cents**, and the per-line equation
+  `billed == paid + coinsurance + copay + deductible + not_allowed` (exact) is
+  simultaneously the honest payer's constraint, the biller's semantic-fault
+  detector, and a test invariant.
+- **Two ledgers**: what remittances revealed vs. what the adversary actually
+  did. The gap is the biller's blind spot; sim-truth is the oracle in every
+  fault test.
 
-Time is **computed, not slept** (Decisions #23): durations cross the
-biller ↔ sim boundary as data. A submission declares when it was sent; the
-sim answers with every delivery that attempt will ever produce, stamped with
-computed virtual arrival times — an empty answer IS the drop faults. The
-claim task compares its next declared arrival against its deadline: the
-same decision the old `select!`-vs-`sleep_until` race made, as arithmetic.
-Timeouts are still **not messages** — silence is the absence of arrivals,
-the biller is never told which hop failed. Latency is a payer property, the
-timeout is a biller policy, and a "timeout fault" only ever *emerges* from
-their comparison. Because nothing sleeps, the sim runs on the stock
-multi-thread scheduler — claim tasks execute in true parallel (`--threads`
-controls the worker count) — and the full finalized event log is identical
-across runs at any thread count, pinned by
-`tests/invariants.rs::full_event_log_is_identical_across_parallel_runs`.
+## Verification and performance
 
-## Determinism
+Seven mechanisms (validation, timeout + bounded retry, idempotency,
+correlation-by-ID, exact reconciliation, garbage == silence, backpressure)
+cover the ~20-row fault table in DESIGN.MD; each fault row landed as one
+commit with a seeded regression test, so `git log --oneline` reads as the
+fault table. Invariant tests assert every-claim-terminal under full chaos,
+slow-payer isolation, and cross-run determinism. Benchmarked at 1M records:
+**2.1× end-to-end** over the previous paused-clock architecture, with
+byte-identical reports — method and numbers in [BENCHMARKS.MD](BENCHMARKS.MD).
 
-**Outcome-deterministic given a seed** (same claims → same terminal states →
-same money) — not wall-clock- or attribution-deterministic. No shared RNG:
-every decision draws from a stream keyed as
-`hash(seed, claim_id, decision_point[, attempt])`. Transport fates include
-the attempt (retries reroll their luck); adjudication content does **not**,
-so a re-delivered claim reproduces the identical remittance — idempotency by
-derivation instead of payer state, which is what makes the payers safely
-stateless. The same discipline covers the *lies*: dishonest adjudication is
-adjudication-family-keyed, so duplicates of a lie are consistent too.
+## Docs
 
-## Money and reconciliation
+Reading order for reviewers:
 
-Money is integer cents (`Money(i64)`), never floats; fractional-cent inputs
-are schema violations. The per-line reconciliation equation
-
-```
-billed == payer_paid + coinsurance + copay + deductible + not_allowed   (exact)
-```
-
-is simultaneously the honest payer's construction constraint, the biller's
-semantic-fault detector, and a test invariant. A fully denied claim that sums
-correctly is **Resolved** — denial is a line-level financial outcome and a
-report, not a lifecycle state.
-
-## Fault tolerance
-
-Seven mechanisms cover the ~20-row fault table: ingest validation,
-timeout + bounded retry with backoff, idempotency/dedup, correlation-by-ID,
-exact reconciliation, response validation (garbage == silence), and
-backpressure. Each fault row landed as one commit with a seeded regression
-test — `git log --oneline` reads as the fault table. Highlights:
-
-- Drops on either hop are indistinguishable silence; the retry that recovers
-  a dropped claim is also what *causes* duplicates when the truth was a
-  dropped remittance — which is why idempotency is not optional.
-- Late remittances can resolve an already-flagged claim (recorded
-  transition); duplicates of a resolved claim are ignored-but-logged.
-- Partial remittances accumulate across retries; partially answered claims
-  keep aging rather than looking fresh.
-- Head-of-line blocking is impossible by construction (task per claim, no
-  shared queue) — held down by a test that makes anthem 100× slower and
-  asserts medicare doesn't notice.
-- The capstone test switches on *every* fault at once and asserts the global
-  guarantee plus outcome-determinism.
-
-## Reports (all pure functions over a ledger snapshot + now)
-
-The A/R views (aging, receivables list, days in A/R) report over a **snapshot
-frozen at the moment intake ends** — a real A/R report is mid-flight by
-nature; on the final books every young receivable has been deliberately
-driven terminal, which would empty the young buckets by construction. The
-summary and diagnostic still assert the terminal guarantee on the final
-ledger, and the output labels both moments.
-
-`AR aging by payer` (ages from **first** submission — retries never make a
-stuck claim look fresh) · `patient responsibility aging` (ages from
-adjudication, when it became patient debt) · `days in A/R` headline ·
-`payer scorecard` — avg response, denial rate, paid/billed, derived from
-remittance data alone; run the demo scenario and watch it rediscover
-anthem's injected slow/denial-happy personality · `denial breakdown` by
-(payer, reason) · `outstanding receivables` (the chase list: cost, age,
-risk = dollars × days) · `sim-truth
-diagnostic` — the biller's view side by side with what the adversary
-actually did.
-
-Outstanding amounts are derived, never stored: a line is booked once
-answered *and* balanced; anything else — unanswered, in dispute — is open
-A/R at full billed value.
-
-## Testing
-
-- **Unit**: the pure core (state machine transitions, reconciliation,
-  validation, money, RNG stream separation, adjudication balance).
-- **Integration, per fault row**: enable one fault against a seeded run,
-  assert the ledger consequence — with sim-truth as ground truth, so tests
-  assert *why*, not just *what*.
-- **Invariant/property**: every-claim-terminal under chaos, burst-ingest
-  losslessness, slow-payer isolation, cross-run determinism, closed-loop
-  scorecard rediscovery.
-- The virtual-time spike is a permanent regression test.
-
-## Monitoring
-
-Structured `tracing` on stderr: per-claim spans (claim_id + payer), ingest
-and rejection events, timeout/retry decisions, late/garbage/quarantine
-warnings, end-of-run counts. The ledger also retains the raw event log —
-live state for runtime monitoring, replayable history for audit — and every
-claim record carries its full append-only event history.
-
-## Performance
-
-Benchmarked at 1M records against the previous paused-clock architecture
-(which was pinned to one thread by tokio's `start_paused` constraint):
-**2.1× end-to-end on a 4-core box** — 158.7s → 76.1s median — of which
-1.29× is the computed-time model alone (the deleted timer machinery) and
-the rest is real parallelism. The claim lifecycles themselves drain in
-under 2 seconds at any thread count; the remaining wall time is data
-plumbing (parse, fold, sort, reports), which is where any further scaling
-work would go. Old and new produce **byte-identical reports** for the same
-seed. Full method, hardware profile, per-phase numbers, and the Amdahl
-analysis: [BENCHMARKS.MD](BENCHMARKS.MD).
-
-## Design docs
-
-- [DESIGN.MD](DESIGN.MD) — the converged design: architecture, fault table,
-  ledger schema, decisions log (every deviation recorded with rationale).
-- [docs/RATIONALE.MD](docs/RATIONALE.MD) — reasoning traces behind rejected
-  alternatives, and honest weaknesses.
-
-Named scope cuts (deliberate, defensible): duplicate-claim denials by
-stateful payers (would require a claim-status-inquiry protocol — EDI
-276/277 — to stay resolvable), clearinghouse misrouting, payer crash as
-distinct from infinite latency. Adjudication amounts are plausible policy,
-not contract pricing — the *shape* is right. Single process by assignment;
-the seams (domain document shapes, ledger API, channel boundaries) are where
-network transport and persistence would slot in.
+1. This README (2 min) — then run the TUI.
+2. [DESIGN.MD](DESIGN.MD) (10 min) — the design as built: architecture, fault
+   table, ledger schema, litigated decisions.
+3. [docs/RATIONALE.MD](docs/RATIONALE.MD) — rejected alternatives, design
+   history, honest weaknesses. [BENCHMARKS.MD](BENCHMARKS.MD) — the 1M-record
+   measurement.
