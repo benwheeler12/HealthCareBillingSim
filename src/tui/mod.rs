@@ -1,17 +1,17 @@
 //! Interactive terminal UI: four panes on a numbered tab bar (←/→ or 1-4 to
 //! move), a live status box pinned to the bottom, and a `?` help overlay.
-//! Navigation is layered: Enter steps down (into a provider's claims, a
-//! claim's audit trail, or the A/R timeline scrubber), Esc steps back up —
-//! the top layer being the pane bar — and Ctrl-C is the only way out of the
-//! program (the plain report prints on the way).
+//! Navigation is layered: Enter steps down (into a provider's A/R analysis
+//! or the A/R timeline scrubber), Esc steps back up — the top layer being
+//! the pane bar — and Ctrl-C is the only way out of the program (the plain
+//! report prints on the way).
 //!
 //! Pane map — the reports arranged as one instrument, money views first,
 //! every pane scrollable by provider:
 //!   1 A/R Aging            outcome bars + aging books as of one moment,
 //!                          scrubbable a day at a time across the run
 //!   2 Payer Scorecard      graded payers + denial detail (scorecard ∪ denials)
-//!   3 Provider Insights    master–detail chase list over the drained final
-//!                          books — what's still open at run completion
+//!   3 Provider Insights    per-provider A/R analysis over the drained final
+//!                          books — what's still open, and what to chase first
 //!   4 Timeline             the run replayed as rate + backlog charts, per book
 //!
 //! Threading: the TUI event loop owns the main thread on the *wall* clock;
@@ -37,17 +37,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Gauge, Paragraph, TableState, Tabs};
 use tokio::sync::watch;
 
-use healthcare_billing_sim::domain::{Money, PayerId, human_virtual};
-use healthcare_billing_sim::ledger::events::ClaimEvent;
+use healthcare_billing_sim::domain::{PayerId, human_virtual};
 use healthcare_billing_sim::ledger::fold::Progress;
-use healthcare_billing_sim::ledger::records::{ClaimRecord, ClaimState, FlagReason};
-use healthcare_billing_sim::reports::chase::{ChaseItem, status_label};
+use healthcare_billing_sim::ledger::records::ClaimState;
 use healthcare_billing_sim::reports::chase_list;
 use healthcare_billing_sim::sim::faults::FaultProfile;
 use healthcare_billing_sim::sim::payer::PayerConfig;
 use healthcare_billing_sim::{RunConfig, RunOutput};
 
-use theme::{ACCENT, ALERT, BAD, GOOD, WARN, bold, dim};
+use theme::{ACCENT, BAD, GOOD, WARN, bold, dim};
 
 pub struct TuiOptions {
     /// Run-configuration banner as (label, value) rows — the same source of
@@ -131,20 +129,10 @@ struct App {
 
 struct Done {
     output: RunOutput,
-    /// Every open receivable, unordered; the insights view holds sorted
-    /// index lists into this.
-    chase: Vec<ChaseItem>,
     timeline: timeline::TimelineView,
     payers: payers::PayersView,
     aging: aging::AgingView,
     insights: insights::Insights,
-    /// Open claim-detail overlay, if any.
-    detail: Option<Detail>,
-}
-
-struct Detail {
-    lines: Vec<Line<'static>>,
-    scroll: u16,
 }
 
 fn event_loop(
@@ -227,20 +215,6 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         return false;
     };
 
-    // The claim overlay — the deepest layer: esc steps back up to the claims
-    // list, ↑/↓ scroll the audit trail.
-    if let Some(detail) = &mut done.detail {
-        match code {
-            KeyCode::Esc => done.detail = None,
-            KeyCode::Up => detail.scroll = detail.scroll.saturating_sub(1),
-            KeyCode::Down => detail.scroll = detail.scroll.saturating_add(1),
-            KeyCode::PageUp => detail.scroll = detail.scroll.saturating_sub(10),
-            KeyCode::PageDown => detail.scroll = detail.scroll.saturating_add(10),
-            _ => {}
-        }
-        return false;
-    }
-
     let panes = PANE_TITLES.len();
     match code {
         // While the A/R timeline is grabbed, ←/→ scrub the as-of day; the
@@ -254,10 +228,14 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Left => app.pane = (app.pane + panes - 1) % panes,
         KeyCode::Right => app.pane = (app.pane + 1) % panes,
         KeyCode::Char(c @ '1'..='4') => app.pane = c as usize - '1' as usize,
-        KeyCode::Up if app.pane == PROVIDERS => done.insights.move_selection(-1, &done.chase),
-        KeyCode::Down if app.pane == PROVIDERS => done.insights.move_selection(1, &done.chase),
-        KeyCode::PageUp if app.pane == PROVIDERS => done.insights.move_selection(-10, &done.chase),
-        KeyCode::PageDown if app.pane == PROVIDERS => done.insights.move_selection(10, &done.chase),
+        KeyCode::Up if app.pane == PROVIDERS => done.insights.move_selection(-1, &done.output),
+        KeyCode::Down if app.pane == PROVIDERS => done.insights.move_selection(1, &done.output),
+        KeyCode::PageUp if app.pane == PROVIDERS => {
+            done.insights.move_selection(-10, &done.output)
+        }
+        KeyCode::PageDown if app.pane == PROVIDERS => {
+            done.insights.move_selection(10, &done.output)
+        }
         KeyCode::Up if app.pane == PAYERS => done.payers.move_selection(-1),
         KeyCode::Down if app.pane == PAYERS => done.payers.move_selection(1),
         KeyCode::PageUp if app.pane == PAYERS => done.payers.move_selection(-10),
@@ -279,35 +257,10 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         KeyCode::Esc if app.pane == PROVIDERS => {
             done.insights.escape();
         }
-        KeyCode::Enter if app.pane == PROVIDERS => match done.insights.focus {
-            // Enter on a provider steps down into their claims.
-            insights::Focus::Providers => done.insights.focus = insights::Focus::Claims,
-            // Enter on a claim steps down again: the full breakdown.
-            insights::Focus::Claims => {
-                let selected = done
-                    .insights
-                    .claims_table
-                    .selected()
-                    .and_then(|i| done.insights.claims.get(i))
-                    .and_then(|&idx| done.chase.get(idx));
-                if let Some(item) = selected {
-                    done.detail = Some(Detail {
-                        lines: claim_detail(&done.output, &item.claim_id.0),
-                        scroll: 0,
-                    });
-                }
-            }
-        },
-        // Sort keys for the claims table: pressing the active key flips the
-        // direction, pressing another switches to it (descending first).
-        KeyCode::Char('c') if app.pane == PROVIDERS => {
-            done.insights.set_sort(insights::SortKey::Cost, &done.chase)
-        }
-        KeyCode::Char('a') if app.pane == PROVIDERS => {
-            done.insights.set_sort(insights::SortKey::Age, &done.chase)
-        }
-        KeyCode::Char('r') if app.pane == PROVIDERS => {
-            done.insights.set_sort(insights::SortKey::Risk, &done.chase)
+        // Enter steps down into the analysis document — the terminal layer;
+        // ↑/↓ then scroll it, Esc steps back to the provider list.
+        KeyCode::Enter if app.pane == PROVIDERS => {
+            done.insights.focus = insights::Focus::Analysis;
         }
         _ => {}
     }
@@ -357,15 +310,13 @@ impl Done {
         let timeline = timeline::build(&output);
         let payers = payers::build(&output, payer_configs, payer_routes);
         let aging = aging::build(&output);
-        let insights = insights::Insights::build(&chase);
+        let insights = insights::Insights::build(&output, &chase);
         Done {
             output,
-            chase,
             timeline,
             payers,
             aging,
             insights,
-            detail: None,
         }
     }
 }
@@ -398,12 +349,8 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
             match app.pane {
                 AGING => aging::draw(frame, content, &mut done.aging, &done.output),
                 PAYERS => payers::draw(frame, content, &mut done.payers),
-                PROVIDERS => insights::draw(frame, content, &mut done.insights, &done.chase),
+                PROVIDERS => insights::draw(frame, content, &mut done.insights),
                 _ => timeline::draw(frame, content, &mut done.timeline),
-            }
-
-            if let Some(detail) = &mut done.detail {
-                draw_detail(frame, content, detail);
             }
         }
     }
@@ -512,21 +459,6 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(status, area);
 }
 
-fn draw_detail(frame: &mut ratatui::Frame, area: Rect, detail: &mut Detail) {
-    let width = area.width.saturating_sub(6).min(96);
-    let height = area.height.saturating_sub(2);
-    let popup = theme::popup(area, width, height);
-    frame.render_widget(Clear, popup);
-    theme::scrolled_paragraph(
-        frame,
-        popup,
-        theme::panel("claim audit trail — ↑/↓ scroll · esc closes")
-            .border_style(Style::default().fg(ACCENT)),
-        &detail.lines,
-        &mut detail.scroll,
-    );
-}
-
 /// The `?` overlay: every key in the app on one card.
 fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
     let key = |k: &str, action: &str| {
@@ -564,15 +496,10 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         note("grades are on the curve: denial rate + response time + paid share"),
         Line::default(),
         section("3 Provider Insights"),
-        key(
-            "enter",
-            "into the provider's claims; on a claim, its audit trail",
-        ),
-        key("esc", "back up: audit trail → claims → providers"),
-        key(
-            "c / a / r",
-            "sort claims by cost / age / risk (again to flip)",
-        ),
+        key("↑/↓", "pick a provider; the analysis follows"),
+        key("enter", "into the analysis document; ↑/↓ scroll it"),
+        key("esc", "back up to the provider list"),
+        note("every figure computed from the drained final books — nothing generated"),
         Line::default(),
         section("4 Timeline"),
         key("↑/↓", "pick a book — the charts re-bucket to its claims"),
@@ -587,273 +514,6 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
             .block(theme::panel("keyboard map").border_style(Style::default().fg(ACCENT))),
         popup,
     );
-}
-
-/// Everything the ledger knows about one claim, straight from the audit
-/// trail: identity, both states (at the intake snapshot and final), money
-/// lines, and the full event history — the event-sourced ledger on display.
-fn claim_detail(output: &RunOutput, claim_id: &str) -> Vec<Line<'static>> {
-    let key = healthcare_billing_sim::domain::ClaimId(claim_id.to_string());
-    let Some(record) = output.ledger.claims.get(&key) else {
-        return vec![Line::from(format!("claim {claim_id} not found"))];
-    };
-    let snapshot = output.intake_ledger.claims.get(&key);
-    let snapshot_state = snapshot
-        .map(state_label)
-        .unwrap_or_else(|| "not yet ingested".to_string());
-
-    let mut lines = vec![Line::from(Span::styled(
-        format!(" claim {claim_id}"),
-        theme::accent_bold(),
-    ))];
-    if let Some(identity) = &record.identity {
-        lines.push(Line::from(Span::styled(
-            format!(
-                " payer {} · member {} · npi {}",
-                identity.payer_id, identity.patient_member_id, identity.provider_npi
-            ),
-            dim(),
-        )));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled(" at intake snapshot  ", bold()),
-        Span::raw(snapshot_state),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(" final state         ", bold()),
-        Span::styled(state_label(record), state_style(&record.state)),
-        Span::styled(format!(" · {} attempts", record.attempts), dim()),
-    ]));
-    lines.push(Line::default());
-    // The decoder ring for the status column: what the state means in this
-    // simulation, snapshot and final when the two differ.
-    lines.push(Line::from(Span::styled(" what this means", bold())));
-    match snapshot.filter(|s| s.state != record.state) {
-        Some(snap) => {
-            push_wrapped(
-                &mut lines,
-                &format!(
-                    "• at the A/R snapshot — {}: {}",
-                    status_label(snap),
-                    state_explanation(snap)
-                ),
-            );
-            push_wrapped(
-                &mut lines,
-                &format!(
-                    "• by the end of the run — {}: {}",
-                    status_label(record),
-                    state_explanation(record)
-                ),
-            );
-        }
-        None => push_wrapped(&mut lines, &state_explanation(record)),
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled(" outstanding         ", bold()),
-        Span::raw(format!(
-            "{} of {} billed",
-            theme::money(record.payer_outstanding()),
-            theme::money(record.lines.iter().map(|l| l.billed()).sum::<Money>())
-        )),
-    ]));
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(" service lines", bold())));
-    for line in &record.lines {
-        let status: Vec<Span> = match &line.adjudication {
-            _ if line.do_not_bill => vec![Span::styled("do_not_bill", dim())],
-            Some(adj) => {
-                let mut spans = vec![
-                    Span::styled(
-                        format!("paid {}", theme::money(adj.payer_paid)),
-                        Style::default().fg(GOOD),
-                    ),
-                    Span::raw(format!(
-                        " · patient {} · not allowed {}",
-                        theme::money(adj.patient_responsibility()),
-                        theme::money(adj.not_allowed)
-                    )),
-                ];
-                if let Some(reason) = adj.denial_reason {
-                    spans.push(Span::styled(
-                        format!(" · denied: {reason}"),
-                        Style::default().fg(ALERT),
-                    ));
-                }
-                spans
-            }
-            None => vec![Span::styled("unanswered", Style::default().fg(WARN))],
-        };
-        let mut spans = vec![Span::raw(format!(
-            "   {} {} ×{} @ {} — ",
-            line.service_line_id, line.procedure_code, line.units, line.unit_charge
-        ))];
-        spans.extend(status);
-        lines.push(Line::from(spans));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(" event history", bold())));
-    for stamped in &record.history {
-        lines.push(Line::from(vec![
-            Span::styled(format!("   {:<26}", stamped.at.to_string()), dim()),
-            Span::styled(event_label(&stamped.event), event_style(&stamped.event)),
-        ]));
-    }
-    lines
-}
-
-/// Word-wrap a long explanation into dim, indented lines — the audit-trail
-/// overlay never wraps in the widget, so line count stays honest for its
-/// scroll clamping.
-fn push_wrapped(lines: &mut Vec<Line<'static>>, text: &str) {
-    const WIDTH: usize = 88;
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current = word.to_string();
-        } else if current.chars().count() + word.chars().count() < WIDTH {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(Line::from(Span::styled(format!("   {current}"), dim())));
-            current = word.to_string();
-        }
-    }
-    if !current.is_empty() {
-        lines.push(Line::from(Span::styled(format!("   {current}"), dim())));
-    }
-}
-
-/// The chase list's plain-English status, with the armed deadline appended
-/// while the claim is still waiting.
-fn state_label(record: &ClaimRecord) -> String {
-    match &record.state {
-        ClaimState::AwaitingResponse { timeout_at } => {
-            format!("{} (deadline {timeout_at})", status_label(record))
-        }
-        _ => status_label(record),
-    }
-}
-
-/// What the state means in this simulation, in operator language — the
-/// claim-detail overlay's decoder ring for the status column.
-fn state_explanation(record: &ClaimRecord) -> String {
-    let answered = record
-        .lines
-        .iter()
-        .any(|l| !l.do_not_bill && l.adjudication.is_some());
-    match &record.state {
-        ClaimState::Pending => "ingested but not yet submitted — claims spend only \
-            milliseconds here between the ingest event and the first submission."
-            .into(),
-        ClaimState::AwaitingResponse { .. } if answered => "a remittance arrived, but some \
-            service lines were missing — lost on the way back from the payer. The lines that \
-            made it are balanced and booked; the unanswered ones keep the claim open and \
-            aging. At the deadline the biller resubmits, and the payer's re-derived answer \
-            can fill in the gaps."
-            .into(),
-        ClaimState::AwaitingResponse { .. } if record.attempts > 1 => "an earlier submission \
-            went unanswered past its follow-up deadline, so the biller sent the claim again. \
-            All silence looks the same from here: the claim may have been dropped on the way \
-            to the payer, the answer dropped or delayed on the way back, or the payer may \
-            simply be slow. Resubmitting is safe — a payer that already adjudicated re-issues \
-            the identical remittance."
-            .into(),
-        ClaimState::AwaitingResponse { .. } => "submitted to the payer through the \
-            clearinghouse; no answer yet, and the follow-up deadline hasn't passed. The \
-            biller cannot tell a slow payer from a dropped claim or a lost answer — silence \
-            is all it sees. If the deadline passes it resubmits, a bounded number of times."
-            .into(),
-        ClaimState::Resolved => "every billable line has an adjudication and the books \
-            balance to the cent — payer paid + patient responsibility + not allowed exactly \
-            equals what was billed. Nothing left outstanding."
-            .into(),
-        ClaimState::Rejected { .. } => "failed validation at ingest (bad JSON, schema \
-            violation, or billing policy) and was never submitted to any payer. Kept as a \
-            ledger row so no input line is silently dropped."
-            .into(),
-        ClaimState::Flagged {
-            reason: FlagReason::RetriesExhausted,
-        } => format!(
-            "the biller submitted this claim {} times — its whole retry budget — and every \
-            deadline passed in silence: on each attempt the claim or its answer was dropped \
-            (or delayed past the timeout) in transit. Unlike a claim still awaiting or \
-            retrying, the biller has stopped chasing: the claim is parked for human \
-            follow-up and its unanswered billed amount stays in A/R. A remittance that \
-            straggles in later can still flip it to resolved.",
-            record.attempts
-        ),
-        ClaimState::Flagged {
-            reason: FlagReason::ReconciliationFailed { billed, accounted },
-        } => {
-            let delta = if accounted < billed {
-                format!("short by {}", *billed - *accounted)
-            } else {
-                format!("over by {}", *accounted - *billed)
-            };
-            format!(
-                "the payer answered, but the money doesn't add up. Every line must satisfy \
-                billed = payer paid + patient responsibility (copay/coinsurance/deductible) \
-                + not allowed, exactly, in cents. Here the payer accounted for {accounted} \
-                against {billed} billed ({delta}) — the simulation's dishonest-payer fault. \
-                The biller refuses to book figures that don't reconcile, so the disputed \
-                amount stays outstanding for a human to take up with the payer."
-            )
-        }
-        ClaimState::Flagged {
-            reason: FlagReason::MalformedRemittance,
-        } => "a remittance correlated to this claim but referenced service lines the claim \
-            doesn't have (or repeated one) — not usable as an answer, so the claim is parked \
-            for human review."
-            .into(),
-    }
-}
-
-fn state_style(state: &ClaimState) -> Style {
-    match state {
-        ClaimState::Resolved => Style::default().fg(GOOD),
-        ClaimState::Rejected { .. } => Style::default().fg(WARN),
-        ClaimState::Flagged { .. } => Style::default().fg(ALERT),
-        _ => Style::default(),
-    }
-}
-
-fn event_label(event: &ClaimEvent) -> String {
-    match event {
-        ClaimEvent::Ingested { .. } => "ingested".into(),
-        ClaimEvent::Rejected { reason } => format!("rejected: {reason:?}"),
-        ClaimEvent::DuplicateIngest { line_no } => {
-            format!("duplicate claim_id on input line {line_no} — first document wins")
-        }
-        ClaimEvent::Submitted {
-            attempt,
-            timeout_at,
-        } => {
-            format!("submitted, attempt {attempt} (deadline {timeout_at})")
-        }
-        ClaimEvent::RemittanceApplied { lines } => {
-            format!("remittance applied: {} line(s) adjudicated", lines.len())
-        }
-        ClaimEvent::Resolved => "resolved — books balance exactly".into(),
-        ClaimEvent::Flagged { reason } => format!("flagged for review: {reason:?}"),
-        ClaimEvent::RemittanceQuarantined => "remittance quarantined (unknown claim)".into(),
-        ClaimEvent::GarbageRemittance => "garbage remittance received — treated as silence".into(),
-        ClaimEvent::LateRemittance { .. } => "late remittance after terminal state".into(),
-    }
-}
-
-fn event_style(event: &ClaimEvent) -> Style {
-    match event {
-        ClaimEvent::Resolved => Style::default().fg(GOOD),
-        ClaimEvent::Rejected { .. } | ClaimEvent::Flagged { .. } => Style::default().fg(ALERT),
-        ClaimEvent::RemittanceQuarantined
-        | ClaimEvent::GarbageRemittance
-        | ClaimEvent::DuplicateIngest { .. } => Style::default().fg(WARN),
-        ClaimEvent::LateRemittance { .. } => dim(),
-        _ => Style::default(),
-    }
 }
 
 /// Render smoke tests: run a real (small, messy) simulation and draw every
@@ -972,16 +632,14 @@ mod render_tests {
         assert!(render(&mut app).contains("keyboard map"));
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
-        // Drill into the top claim on the providers pane: Enter steps down
-        // into the claims, Enter again opens the audit trail.
+        // The providers pane renders the selected provider's analysis
+        // document — headline first, every figure computed from the ledger.
         app.pane = PROVIDERS;
-        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         let text = render(&mut app);
-        assert!(text.contains("claim audit trail"), "no overlay:\n{text}");
-        assert!(text.contains("event history"));
-        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        // Esc steps the rest of the way back up: claims → providers.
+        assert!(text.contains("A/R analysis"), "no analysis doc:\n{text}");
+        assert!(text.contains("HEADLINE"), "{text}");
+        assert!(text.contains("outstanding across"), "{text}");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
         // The aging pane re-derives its report — outcome bars included —
@@ -1092,19 +750,23 @@ mod render_tests {
         let mut app = done_app();
         app.pane = PROVIDERS;
         let focus = |app: &App| app.done.as_ref().expect("done").insights.focus;
+        let scroll = |app: &App| app.done.as_ref().expect("done").insights.scroll;
 
         assert!(matches!(focus(&app), insights::Focus::Providers));
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(focus(&app), insights::Focus::Claims));
-        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(app.done.as_ref().expect("done").detail.is_some());
+        assert!(matches!(focus(&app), insights::Focus::Analysis));
 
-        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        assert!(app.done.as_ref().expect("done").detail.is_none());
-        assert!(matches!(focus(&app), insights::Focus::Claims));
+        // With the document focused, ↑/↓ scroll it instead of moving the
+        // provider selection.
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(scroll(&app), 1);
+        handle_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(scroll(&app), 0);
+
+        // Esc steps back up; the analysis is the terminal layer, so one Esc
+        // lands on the providers, where Esc becomes a no-op — never a quit.
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(focus(&app), insights::Focus::Providers));
-        // At the top layer Esc is a no-op — it must never terminate.
         assert!(!handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(focus(&app), insights::Focus::Providers));
     }
@@ -1190,7 +852,6 @@ mod frame_dump {
         app.help = false;
         app.pane = PROVIDERS;
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        dump(&mut app, &dir, "detail");
+        dump(&mut app, &dir, "insights-analysis");
     }
 }
