@@ -62,8 +62,10 @@ money waterfall as proportional bars) over the aging tables, buckets
 colored green → red with a per-payer mix bar, every number derived from
 the same as-of snapshot and recomputed for whichever book is selected;
 Tab hops focus so ↑/↓ can either change the provider or scroll the
-report. Enter grabs the **timeline scrubber**: ←/→ then move the as-of
-moment a virtual day at a time across the whole run — the books are
+report. Enter grabs the **timeline scrubber**, pinned at the bottom of
+the report window: ←/→ then move the as-of moment a virtual day at a
+time across the whole run (hold an arrow for a second and the scrub
+fast-forwards to four days per step, with a ×4 badge) — the books are
 replayed from the event log to that day, so the bars, tables, and
 provider list all animate through time — and Esc hands the arrows back
 to the pane bar. The **Payer Scorecard
