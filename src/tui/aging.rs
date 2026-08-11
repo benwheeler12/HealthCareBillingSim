@@ -5,11 +5,11 @@
 //! aging tables with their colored buckets and mix bars, every number
 //! derived from the same as-of snapshot, with the timeline scrubber pinned
 //! at the bottom of that same window. The view opens at the end of intake
-//! (the mid-flight moment a biller actually lives in); Enter grabs the
-//! timeline so ←/→ scrub the as-of day across the whole run — hold an arrow
-//! for a second and the scrub fast-forwards to four days per step — and Esc
-//! lets go. Tab hops focus so ↑/↓ can either change the selection or scroll
-//! the report.
+//! (the mid-flight moment a biller actually lives in). Arrow keys, Enter,
+//! and Esc drive everything: ↑/↓ pick a book, Enter steps into the report
+//! window — there ↑/↓ scroll the document and ←/→ scrub the as-of day
+//! across the whole run (hold an arrow for a second and the scrub
+//! fast-forwards to four days per step) — and Esc steps back out.
 
 use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
@@ -123,11 +123,11 @@ struct ProviderRow {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
+    /// The base layer: ↑/↓ pick a book, ←/→ control the pane bar.
     Providers,
-    Tables,
-    /// Enter grabbed the timeline: ←/→ step the as-of day instead of
-    /// switching panes, until Esc hands them back.
-    Timeline,
+    /// Enter stepped into the report window: ↑/↓ scroll the document and
+    /// ←/→ scrub the timeline a day at a time, until Esc steps back out.
+    Report,
 }
 
 pub fn build(output: &RunOutput) -> AgingView {
@@ -215,39 +215,32 @@ fn provider_totals(books: &Ledger) -> HashMap<String, (usize, Money)> {
 
 impl AgingView {
     /// ↑/↓: move whichever side has focus — the provider selection (which
-    /// rebuilds the report; the timeline shares this, so scrubbing and
-    /// switching books compose) or the report scroll.
+    /// rebuilds the report) or the report scroll.
     pub fn key_move(&mut self, delta: isize, output: &RunOutput) {
         match self.focus {
-            Focus::Providers | Focus::Timeline => {
+            Focus::Providers => {
                 if super::step(&mut self.table, self.providers.len(), delta) {
                     self.doc = self.build_doc(output);
                     self.scroll = 0;
                 }
             }
-            Focus::Tables => {
+            Focus::Report => {
                 self.scroll = self.scroll.saturating_add_signed(delta as i16);
             }
         }
     }
 
-    pub fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Providers => Focus::Tables,
-            Focus::Tables | Focus::Timeline => Focus::Providers,
-        };
-    }
-
-    /// Enter: one layer deeper — grab the timeline.
-    pub fn enter_timeline(&mut self) {
-        self.focus = Focus::Timeline;
+    /// Enter: one layer deeper — step into the report window, where ↑/↓
+    /// scroll the document and ←/→ scrub the timeline.
+    pub fn enter_report(&mut self) {
+        self.focus = Focus::Report;
     }
 
     /// Esc: one layer back up. Returns false when already at the base layer
     /// (provider list), where ←/→ already control the pane bar.
     pub fn escape(&mut self) -> bool {
         match self.focus {
-            Focus::Timeline | Focus::Tables => {
+            Focus::Report => {
                 self.focus = Focus::Providers;
                 true
             }
@@ -256,7 +249,7 @@ impl AgingView {
     }
 
     pub fn timeline_grabbed(&self) -> bool {
-        self.focus == Focus::Timeline
+        self.focus == Focus::Report
     }
 
     /// ←/→ while the timeline is grabbed: move the as-of moment one virtual
@@ -528,10 +521,9 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut AgingView, output
     frame.render_widget(
         theme::keys_hint(&[
             ("↑/↓", "pick a provider (all providers first)"),
-            ("tab", "hop over to scroll the tables"),
             (
                 "enter",
-                "grab the timeline — ←/→ move a day (hold: ×4), esc lets go",
+                "into the report — ↑/↓ scroll, ←/→ move a day (hold: ×4), esc back",
             ),
             ("green → red", "receivables aging past 90 days"),
         ]),
@@ -543,7 +535,7 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut AgingView, output
 
     let focus_style = Style::default().fg(ACCENT);
     let blur_style = theme::dim();
-    let list_focused = matches!(view.focus, Focus::Providers | Focus::Timeline);
+    let list_focused = view.focus == Focus::Providers;
 
     let provider_rows: Vec<Row> = view
         .providers
@@ -581,7 +573,7 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut AgingView, output
     .block(
         theme::panel(format!("Books — {} rows", view.providers.len()))
             .title_bottom(position)
-            .border_style(if view.focus == Focus::Providers {
+            .border_style(if list_focused {
                 focus_style
             } else {
                 blur_style
@@ -596,7 +588,7 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut AgingView, output
         .map(str::to_string)
         .unwrap_or_else(|| "all providers".to_string());
     let mut block =
-        theme::panel(format!("A/R Aging — {scope}")).border_style(if view.focus == Focus::Tables {
+        theme::panel(format!("A/R Aging — {scope}")).border_style(if view.focus == Focus::Report {
             focus_style
         } else {
             blur_style
@@ -670,9 +662,9 @@ fn timeline_line(view: &AgingView, output: &RunOutput) -> Line<'static> {
         format!(
             "  ·  {}",
             if grabbed {
-                "←/→ ±1 day (hold 1s: ×4) · esc lets go"
+                "←/→ ±1 day (hold 1s: ×4) · esc backs out"
             } else {
-                "enter grabs the timeline"
+                "enter steps into the report"
             }
         ),
         dim(),
