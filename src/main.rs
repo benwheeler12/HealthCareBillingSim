@@ -35,16 +35,13 @@ struct Cli {
     #[arg(long, default_value_t = 42, help_heading = "Simulation")]
     seed: u64,
 
-    /// Ingest rate, claims per VIRTUAL second (wall time is always fast).
-    /// The default spreads the 10k sample across ~9.5 virtual months so
-    /// receivables genuinely age; raise it to compress the timeline.
+    /// Ingest rate, claims per VIRTUAL second; the default lets receivables
+    /// age over months. Raise it to compress the timeline.
     #[arg(long, default_value_t = 0.0004, help_heading = "Simulation")]
     rate: f64,
 
-    /// Named fault preset. The default is 'messy' — real clearinghouses lose
-    /// things, so a plain run shows drops, duplicates, and delays being
-    /// survived. 'honest' is the lossless baseline; 'chaos' is everything at
-    /// once.
+    /// Fault preset: 'honest' is lossless, 'messy' has drops, duplicates,
+    /// and delays, 'chaos' is everything at once.
     #[arg(long, default_value = "messy", value_parser = ["honest", "messy", "chaos"], help_heading = "Simulation")]
     preset: String,
 
@@ -122,7 +119,6 @@ struct Cli {
     no_tui: bool,
 
     /// Worker threads for the simulation runtime (0 = one per CPU core).
-    /// Time is computed, not slept, so claim tasks parallelize freely.
     #[arg(long, default_value_t = 0, help_heading = "Simulation")]
     threads: usize,
 }
@@ -342,17 +338,21 @@ fn banner_rows(cli: &Cli, cfg: &RunConfig, provenance: &[String]) -> Vec<(String
     for payer in healthcare_billing_sim::domain::PayerId::ALL {
         let p = &cfg.payers[&payer];
         let route = match cfg.payer_faults.get(&payer) {
-            Some(profile) => format!(" · route: {}", profile.summary()),
+            Some(profile) => format!("  route: {}", profile.summary()),
             None => String::new(),
         };
+        // Aligned columns — ten of these rows in a stack must scan as a table.
         rows.push((
             payer.as_str().to_string(),
             format!(
-                "responds in {} to {} · denies {:.0}% · copay {}{route}",
-                human_short(p.min_response_time_secs),
-                human_short(p.max_response_time_secs),
+                "{:<8} denies {:>2.0}%  copay {:>6}{route}",
+                format!(
+                    "{}–{}",
+                    human_short(p.min_response_time_secs),
+                    human_short(p.max_response_time_secs)
+                ),
                 p.denial_rate * 100.0,
-                p.copay,
+                p.copay.to_string(),
             ),
         ));
     }
@@ -371,7 +371,7 @@ fn print_banner(cli: &Cli, cfg: &RunConfig, provenance: &[String], style: &Style
     println!("{bold}{cyan}Healthcare Billing Lifecycle Simulation{reset}");
     println!("{dim}{}{reset}", "─".repeat(72));
     for (label, value) in banner_rows(cli, cfg, provenance) {
-        println!("  {bold}{label:<20}{reset} {value}");
+        println!("  {bold}{label:<22}{reset} {value}");
     }
     println!("{dim}{}{reset}\n", "─".repeat(72));
 }

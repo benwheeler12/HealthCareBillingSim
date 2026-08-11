@@ -43,13 +43,13 @@ impl FaultProfile {
         };
         let mut parts = Vec::new();
         if self.forward_drop_rate > 0.0 {
-            parts.push(format!("forward drops {}", pct(self.forward_drop_rate)));
+            parts.push(format!("fwd drops {}", pct(self.forward_drop_rate)));
         }
         if self.return_drop_rate > 0.0 {
-            parts.push(format!("return drops {}", pct(self.return_drop_rate)));
+            parts.push(format!("ret drops {}", pct(self.return_drop_rate)));
         }
         if self.duplicate_rate > 0.0 {
-            parts.push(format!("duplicates {}", pct(self.duplicate_rate)));
+            parts.push(format!("dups {}", pct(self.duplicate_rate)));
         }
         if self.extra_delay_rate > 0.0 {
             parts.push(format!(

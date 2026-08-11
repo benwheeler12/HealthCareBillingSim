@@ -146,7 +146,7 @@ fn aging_table(
     writeln!(f, "{title}")?;
     writeln!(
         f,
-        "  {:<20} {:>12} {:>12} {:>12} {:>12} {:>12}",
+        "  {:<22} {:>12} {:>12} {:>12} {:>12} {:>12}",
         "payer", "0-30d", "31-60d", "61-90d", "90+d", "total"
     )?;
     let mut grand = AgingBuckets::default();
@@ -161,14 +161,22 @@ fn aging_table(
 }
 
 fn aging_row(f: &mut fmt::Formatter<'_>, label: &str, b: &AgingBuckets) -> fmt::Result {
+    // Empty buckets print as a dash so the eye lands on the money.
+    let cell = |m: Money| {
+        if m == Money::ZERO {
+            "–".to_string()
+        } else {
+            m.to_string()
+        }
+    };
     writeln!(
         f,
-        "  {:<20} {:>12} {:>12} {:>12} {:>12} {:>12}",
+        "  {:<22} {:>12} {:>12} {:>12} {:>12} {:>12}",
         label,
-        b.d0_30.to_string(),
-        b.d31_60.to_string(),
-        b.d61_90.to_string(),
-        b.d90_plus.to_string(),
+        cell(b.d0_30),
+        cell(b.d31_60),
+        cell(b.d61_90),
+        cell(b.d90_plus),
         b.total().to_string(),
     )
 }

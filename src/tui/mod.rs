@@ -433,7 +433,7 @@ fn draw_running(frame: &mut ratatui::Frame, tabs_area: Rect, content: Rect, app:
         .iter()
         .map(|(label, value)| {
             Line::from(vec![
-                Span::styled(format!(" {label:<20} "), bold()),
+                Span::styled(format!(" {label:<22} "), bold()),
                 Span::raw(value.clone()),
             ])
         })
