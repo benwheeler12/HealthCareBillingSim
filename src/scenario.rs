@@ -369,7 +369,7 @@ mod tests {
             }"#,
         )
         .expect("parse");
-        let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);
+        let mut cfg = RunConfig::new(crate::ClaimSource::Lines(Vec::new()), 1, 1.0);
         let default_anthem_max = cfg.payers[&PayerId::Anthem].max_response_time_secs;
         scenario.apply(&mut cfg);
 
@@ -392,7 +392,7 @@ mod tests {
         assert!(preset("nonsense").is_none());
 
         // Honest: realistic clocks, zero fault rates anywhere.
-        let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);
+        let mut cfg = RunConfig::new(crate::ClaimSource::Lines(Vec::new()), 1, 1.0);
         preset("honest").expect("honest").apply(&mut cfg);
         assert_eq!(cfg.faults.forward_drop_rate, 0.0);
         assert!(cfg.payer_faults.is_empty());
@@ -403,7 +403,7 @@ mod tests {
         );
 
         // Messy: per-payer route personalities.
-        let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);
+        let mut cfg = RunConfig::new(crate::ClaimSource::Lines(Vec::new()), 1, 1.0);
         preset("messy").expect("messy").apply(&mut cfg);
         let anthem = cfg.payer_faults[&PayerId::Anthem];
         let medicare = cfg.payer_faults[&PayerId::Medicare];
@@ -419,7 +419,7 @@ mod tests {
         assert!(cigna.corrupt_claim_id_rate > 0.0);
 
         // Chaos: everything on, tight budget.
-        let mut cfg = RunConfig::new("x.jsonl".into(), 1, 1.0);
+        let mut cfg = RunConfig::new(crate::ClaimSource::Lines(Vec::new()), 1, 1.0);
         preset("chaos").expect("chaos").apply(&mut cfg);
         assert!(cfg.faults.corrupt_remittance_rate > 0.0);
         assert_eq!(cfg.policy.max_attempts, 2);

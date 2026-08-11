@@ -470,7 +470,10 @@ fn top_chase(doc: &mut String, open: &[ChaseItem]) {
     if open.len() > TOP_CHASE {
         wrapped(
             doc,
-            &format!("… and {} more open claims below them", open.len() - TOP_CHASE),
+            &format!(
+                "… and {} more open claims below them",
+                open.len() - TOP_CHASE
+            ),
         );
     }
 }
@@ -599,8 +602,7 @@ fn wrapped(doc: &mut String, text: &str) {
     let Some(first) = words.next() else {
         return;
     };
-    let hanging =
-        first.chars().count() <= 2 && (first.ends_with('.') || "▲●…".contains(first));
+    let hanging = first.chars().count() <= 2 && (first.ends_with('.') || "▲●…".contains(first));
     let rest_indent = if hanging { "     " } else { "  " };
     let mut line = format!("  {first}");
     for word in words {
@@ -661,8 +663,7 @@ mod tests {
         lines: Vec<LineRecord>,
     ) -> ClaimRecord {
         let submitted = VirtualTime::default()
-            + (now().as_duration().checked_sub(DAY * age_days))
-                .expect("age fits inside the run");
+            + (now().as_duration().checked_sub(DAY * age_days)).expect("age fits inside the run");
         ClaimRecord {
             claim_id: ClaimId(id.into()),
             identity: Some(ClaimIdentity {
@@ -773,8 +774,14 @@ mod tests {
         let (ledger, now) = ledger();
         let doc = provider_analysis(&ledger, now, "Clinic A");
         // c-1 + c-2 = $800 past 90 days, all with cigna.
-        assert!(flat(&doc).contains("$800.00 (73%) has already aged past 90 days"), "{doc}");
-        assert!(flat(&doc).contains("all of it with cigna ($800.00)"), "{doc}");
+        assert!(
+            flat(&doc).contains("$800.00 (73%) has already aged past 90 days"),
+            "{doc}"
+        );
+        assert!(
+            flat(&doc).contains("all of it with cigna ($800.00)"),
+            "{doc}"
+        );
         // c-4's open line is 45 days old — nothing sits at 61–90.
         assert!(!flat(&doc).contains("61–90 days and crosses"), "{doc}");
     }
@@ -787,7 +794,10 @@ mod tests {
         assert!(flat(&doc).contains("1 retrying"), "{doc}");
         assert!(flat(&doc).contains("1 partial remit"), "{doc}");
         assert!(flat(&doc).contains("1 flagged for human review"), "{doc}");
-        assert!(flat(&doc).contains("1 gave up after exhausting retries"), "{doc}");
+        assert!(
+            flat(&doc).contains("1 gave up after exhausting retries"),
+            "{doc}"
+        );
     }
 
     #[test]
@@ -795,11 +805,23 @@ mod tests {
         let (ledger, now) = ledger();
         let doc = provider_analysis(&ledger, now, "Clinic A");
         // cigna: $800 of $1100, 100% past 90 days, one flagged claim.
-        assert!(flat(&doc).contains("▲ cigna — $800.00 open (73% of open A/R)"), "{doc}");
-        assert!(flat(&doc).contains("100% of its balance is past 90 days"), "{doc}");
-        assert!(flat(&doc).contains("1 open claim flagged for review"), "{doc}");
+        assert!(
+            flat(&doc).contains("▲ cigna — $800.00 open (73% of open A/R)"),
+            "{doc}"
+        );
+        assert!(
+            flat(&doc).contains("100% of its balance is past 90 days"),
+            "{doc}"
+        );
+        assert!(
+            flat(&doc).contains("1 open claim flagged for review"),
+            "{doc}"
+        );
         // aetna's balance is young and unflagged.
-        assert!(flat(&doc).contains("● aetna — $300.00 open (27% of open A/R)"), "{doc}");
+        assert!(
+            flat(&doc).contains("● aetna — $300.00 open (27% of open A/R)"),
+            "{doc}"
+        );
         assert!(flat(&doc).contains("normal follow-up cadence"), "{doc}");
     }
 
@@ -808,7 +830,10 @@ mod tests {
         let (ledger, now) = ledger();
         let doc = provider_analysis(&ledger, now, "Clinic A");
         // risk: c-1 50,000 > c-2 28,500 > c-4 4,500 > c-3 2,000.
-        let pos = |needle: &str| doc.find(needle).unwrap_or_else(|| panic!("{needle} missing:\n{doc}"));
+        let pos = |needle: &str| {
+            doc.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing:\n{doc}"))
+        };
         assert!(pos("1. c-1") < pos("2. c-2"), "{doc}");
         assert!(pos("2. c-2") < pos("3. c-4"), "{doc}");
         assert!(pos("3. c-4") < pos("4. c-3"), "{doc}");
@@ -822,7 +847,10 @@ mod tests {
             flat(&doc).contains("Escalate the 1 claim flagged \"no response, gave up\" ($300.00)"),
             "{doc}"
         );
-        assert!(flat(&doc).contains("verify the missing lines with the payer"), "{doc}");
+        assert!(
+            flat(&doc).contains("verify the missing lines with the payer"),
+            "{doc}"
+        );
     }
 
     #[test]

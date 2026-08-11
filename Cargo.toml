@@ -2,7 +2,6 @@
 name = "healthcare-billing-sim"
 version = "0.1.0"
 edition = "2024"
-default-run = "healthcare-billing-sim"
 rust-version = "1.85"
 
 [dependencies]
@@ -21,7 +20,3 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", 
 ratatui = "0.29"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[[bin]]
-name = "generate-claims"
-path = "src/bin/generate_claims.rs"

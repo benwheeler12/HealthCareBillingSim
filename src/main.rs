@@ -5,30 +5,58 @@ use std::time::Duration;
 use clap::Parser;
 use tokio::sync::watch;
 
-use healthcare_billing_sim::domain::human_virtual;
+use healthcare_billing_sim::claimgen::GenConfig;
 use healthcare_billing_sim::ledger::fold::Progress;
 use healthcare_billing_sim::reports::{
     ChaseList, Denials, Scorecard, ar_aging, chase_list, days_in_ar, denial_breakdown, diagnostic,
     payer_scorecard, summarize,
 };
 use healthcare_billing_sim::scenario::{FaultPatch, PolicyPatch, Scenario};
-use healthcare_billing_sim::{RunConfig, RunOutput, run, scenario};
+use healthcare_billing_sim::simconfig::{Preset, SimConfig};
+use healthcare_billing_sim::{RunOutput, run, scenario};
 
 mod tui;
 
 /// Healthcare billing lifecycle simulation: biller ↔ clearinghouse ↔ payers.
 ///
-/// Reads one PayerClaim JSON object per line, drives every claim to a
-/// terminal state under seeded faults and virtual time, then prints the
-/// practice owner's reports. Same seed, same outcomes.
+/// Opens on an interactive configuration screen; Enter generates the claim
+/// population in memory, streams it through the simulation under seeded
+/// faults and virtual time, and lands on the analysis dashboard — where the
+/// configuration pane starts the next run. Same seed, same outcomes.
+///
+/// Flags set the initial values of that configuration screen. When stdout is
+/// not a terminal (pipes, CI) or with --no-tui, one run executes headlessly
+/// and the plain sequential reports print instead.
 ///
 /// Configuration precedence: defaults → --preset → --fault-profile file →
 /// individual flags.
 #[derive(Parser)]
 #[command(version, about, max_term_width = 100)]
 struct Cli {
-    /// Input file: one PayerClaim JSON object per line.
-    input: PathBuf,
+    // ---------------- Generation ----------------
+    /// Number of claim documents to generate for each run.
+    #[arg(long, default_value_t = 10_000, help_heading = "Generation")]
+    count: usize,
+
+    /// Fraction of generated documents that are malformed in some way.
+    #[arg(
+        long,
+        default_value_t = 0.02,
+        value_name = "0..1",
+        help_heading = "Generation"
+    )]
+    malformed_rate: f64,
+
+    /// Generator seed; defaults to following --seed, so one seed rerolls the
+    /// whole world. Pin it to keep the claim population fixed while fault
+    /// luck varies.
+    #[arg(long, help_heading = "Generation")]
+    gen_seed: Option<u64>,
+
+    /// Disable the payer-mix drift (slow payers early, fast payers late)
+    /// and generate a uniform mix instead.
+    #[arg(long, help_heading = "Generation")]
+    no_drift: bool,
 
     // ---------------- Simulation ----------------
     /// Master seed; a given seed reproduces the same claim outcomes.
@@ -49,6 +77,10 @@ struct Cli {
     /// retry-policy overrides. See data/demo_scenario.json.
     #[arg(long, value_name = "FILE", help_heading = "Simulation")]
     fault_profile: Option<PathBuf>,
+
+    /// Worker threads for the simulation runtime (0 = one per CPU core).
+    #[arg(long, default_value_t = 0, help_heading = "Simulation")]
+    threads: usize,
 
     // ---------------- Fault injection ----------------
     /// Probability a claim is dropped on the biller → payer hop.
@@ -117,10 +149,6 @@ struct Cli {
     /// stdout is not a terminal).
     #[arg(long, help_heading = "Output")]
     no_tui: bool,
-
-    /// Worker threads for the simulation runtime (0 = one per CPU core).
-    #[arg(long, default_value_t = 0, help_heading = "Simulation")]
-    threads: usize,
 }
 
 /// Multi-thread tokio runtime for the simulation (DESIGN.md 'Virtual time': nothing
@@ -136,6 +164,10 @@ fn sim_runtime(threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     anyhow::ensure!(cli.rate > 0.0, "--rate must be positive");
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&cli.malformed_rate),
+        "--malformed-rate must be in [0,1]"
+    );
     let interactive = std::io::stdout().is_terminal() && !cli.no_tui;
 
     // Logs to stderr; stdout is reserved for the reports. While the
@@ -155,39 +187,36 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let style = Style::detect(cli.no_color);
-    let (cfg, provenance) = build_config(&cli)?;
+    let (cfg, provenance) = build_sim_config(&cli)?;
 
-    // Interactive UI on a real terminal; plain sequential output for pipes,
-    // CI, and --no-tui — that path still satisfies the assessment's
-    // "serialize to terminal, then shut down" contract verbatim.
+    // Interactive UI on a real terminal: configure → run → explore → rerun.
+    // Plain sequential output for pipes, CI, and --no-tui: one headless run
+    // of the flag-built configuration, then the reports.
     if interactive {
-        let rows = banner_rows(&cli, &cfg, &provenance);
-        let output = tui::run(
-            cfg,
-            tui::TuiOptions {
-                banner_rows: rows,
-                seed: cli.seed,
-                threads: cli.threads,
-            },
-        )?;
-        // Leave a plain-text record in the scrollback after the UI closes.
-        let (cfg_again, _) = build_config(&cli)?;
-        print_banner(&cli, &cfg_again, &provenance, &style);
-        print_reports(&cli, &output, None, &style);
+        match tui::run(cfg)? {
+            // Leave a plain-text record of the last completed run in the
+            // scrollback after the UI closes — banner from the snapshot that
+            // actually ran, edits made afterwards notwithstanding.
+            Some((ran_cfg, output)) => {
+                print_banner(&ran_cfg, &["interactive session".to_string()], &style);
+                print_reports(cli.chase, &ran_cfg, &output, None, &style);
+            }
+            None => println!("no simulation run completed — nothing to report"),
+        }
         return Ok(());
     }
 
-    print_banner(&cli, &cfg, &provenance, &style);
+    print_banner(&cfg, &provenance, &style);
 
-    let runtime = sim_runtime(cli.threads)?;
+    let runtime = sim_runtime(cfg.threads)?;
     let wall_start = std::time::Instant::now();
     let output = runtime.block_on(async {
-        let mut cfg = cfg;
+        let mut run_cfg = cfg.to_run_config();
         let progress_task = spawn_progress_bar(&cli).map(|(tx, task)| {
-            cfg.progress = Some(tx);
+            run_cfg.progress = Some(tx);
             task
         });
-        let result = run(cfg).await;
+        let result = run(run_cfg).await;
         if let Some(task) = progress_task {
             let _ = task.await;
         }
@@ -196,7 +225,7 @@ fn main() -> anyhow::Result<()> {
     let wall = wall_start.elapsed();
 
     let t_reports = std::time::Instant::now();
-    print_reports(&cli, &output, Some(wall), &style);
+    print_reports(cli.chase, &cfg, &output, Some(wall), &style);
     if std::env::var_os("SIM_PHASES").is_some() {
         eprintln!(
             "SIM_PHASES reports={:.2}s",
@@ -211,7 +240,13 @@ fn main() -> anyhow::Result<()> {
 /// receivables would be empty by construction. Aging/chase/days-in-A/R
 /// report over the books as of the moment intake ended; everything else
 /// reads the final ledger.
-fn print_reports(cli: &Cli, output: &RunOutput, wall: Option<Duration>, style: &Style) {
+fn print_reports(
+    chase: usize,
+    cfg: &SimConfig,
+    output: &RunOutput,
+    wall: Option<Duration>,
+    style: &Style,
+) {
     let ledger = &output.ledger;
     let (books, as_of) = (&output.intake_ledger, output.intake_finished_at);
     print_styled(&summarize(ledger).to_string(), style);
@@ -232,7 +267,7 @@ fn print_reports(cli: &Cli, output: &RunOutput, wall: Option<Duration>, style: &
     print_styled(&Denials(denial_breakdown(ledger)).to_string(), style);
     println!();
     print_styled(
-        &ChaseList(chase_list(books, as_of, cli.chase)).to_string(),
+        &ChaseList(chase_list(books, as_of, chase)).to_string(),
         style,
     );
     println!();
@@ -246,22 +281,33 @@ fn print_reports(cli: &Cli, output: &RunOutput, wall: Option<Duration>, style: &
         "\n{}simulated {} claims across {virtual_days:.1} virtual days{wall_note} · seed {}{}",
         style.dim,
         output.ledger.claims.len(),
-        cli.seed,
+        cfg.seed,
         style.reset,
     );
 }
 
-/// Defaults → preset → scenario file → individual flags. Returns the config
-/// plus a human-readable description of where it came from.
-fn build_config(cli: &Cli) -> anyhow::Result<(RunConfig, Vec<String>)> {
-    let mut cfg = RunConfig::new(cli.input.clone(), cli.seed, cli.rate);
+/// Defaults → preset → scenario file → individual flags, landing in the one
+/// editable SimConfig the whole session shares. Returns the config plus a
+/// human-readable description of where it came from.
+fn build_sim_config(cli: &Cli) -> anyhow::Result<(SimConfig, Vec<String>)> {
+    let mut cfg = SimConfig {
+        seed: cli.seed,
+        rate_per_sec: cli.rate,
+        threads: cli.threads,
+        generator: GenConfig {
+            count: cli.count,
+            seed: cli.gen_seed,
+            malformed_rate: cli.malformed_rate,
+            drift: !cli.no_drift,
+        },
+        ..SimConfig::default()
+    };
+    cfg.apply_preset(Preset::parse(&cli.preset).expect("clap validated the preset name"));
     let mut provenance = vec![format!("preset '{}'", cli.preset)];
 
-    scenario::preset(&cli.preset)
-        .expect("clap validated the preset name")
-        .apply(&mut cfg);
     if let Some(path) = &cli.fault_profile {
-        scenario::load(path)?.apply(&mut cfg);
+        cfg.apply_scenario(&scenario::load(path)?);
+        cfg.preset = Preset::Custom;
         provenance.push(format!("scenario file {}", path.display()));
     }
 
@@ -287,7 +333,8 @@ fn build_config(cli: &Cli) -> anyhow::Result<(RunConfig, Vec<String>)> {
     let overrides = flags.count_set();
     if overrides > 0 {
         flags.validated()?;
-        flags.apply(&mut cfg);
+        cfg.apply_scenario(&flags);
+        cfg.preset = Preset::Custom;
         provenance.push(format!(
             "{overrides} flag override{}",
             if overrides == 1 { "" } else { "s" }
@@ -296,71 +343,7 @@ fn build_config(cli: &Cli) -> anyhow::Result<(RunConfig, Vec<String>)> {
     Ok((cfg, provenance))
 }
 
-/// The banner as (label, value) rows — one source of truth for both the
-/// styled stdout print and the TUI's configuration pane.
-fn banner_rows(cli: &Cli, cfg: &RunConfig, provenance: &[String]) -> Vec<(String, String)> {
-    let file_size = std::fs::metadata(&cli.input)
-        .map(|m| format!(" ({})", human_bytes(m.len())))
-        .unwrap_or_default();
-    let interval_hint = if cfg.rate_per_sec < 0.1 {
-        format!(" (one every {})", human_virtual(1.0 / cfg.rate_per_sec))
-    } else {
-        String::new()
-    };
-    // Displayed per virtual minute — nobody thinks in 0.0004 claims/second.
-    let per_min = cfg.rate_per_sec * 60.0;
-    let rate_display = match per_min {
-        r if r >= 10.0 => format!("{r:.0}"),
-        r if r >= 1.0 => format!("{r:.1}"),
-        r => format!("{r:.2}"),
-    };
-    let mut rows = vec![
-        (
-            "input".to_string(),
-            format!("{}{file_size}", cli.input.display()),
-        ),
-        ("seed".to_string(), cfg.seed.to_string()),
-        (
-            "ingest rate".to_string(),
-            format!("{rate_display} claims per virtual minute{interval_hint}"),
-        ),
-        (
-            "retry policy".to_string(),
-            format!(
-                "{} attempts · {} timeout · {} backoff base",
-                cfg.policy.max_attempts,
-                human_virtual(cfg.policy.timeout.as_secs_f64()),
-                human_virtual(cfg.policy.backoff_base.as_secs_f64()),
-            ),
-        ),
-        ("faults".to_string(), cfg.faults.summary()),
-    ];
-    for payer in healthcare_billing_sim::domain::PayerId::ALL {
-        let p = &cfg.payers[&payer];
-        let route = match cfg.payer_faults.get(&payer) {
-            Some(profile) => format!("  route: {}", profile.summary()),
-            None => String::new(),
-        };
-        // Aligned columns — ten of these rows in a stack must scan as a table.
-        rows.push((
-            payer.as_str().to_string(),
-            format!(
-                "{:<8} denies {:>2.0}%  copay {:>6}{route}",
-                format!(
-                    "{}–{}",
-                    human_short(p.min_response_time_secs),
-                    human_short(p.max_response_time_secs)
-                ),
-                p.denial_rate * 100.0,
-                p.copay.to_string(),
-            ),
-        ));
-    }
-    rows.push(("config from".to_string(), provenance.join(" → ")));
-    rows
-}
-
-fn print_banner(cli: &Cli, cfg: &RunConfig, provenance: &[String], style: &Style) {
+fn print_banner(cfg: &SimConfig, provenance: &[String], style: &Style) {
     let Style {
         bold,
         dim,
@@ -370,7 +353,9 @@ fn print_banner(cli: &Cli, cfg: &RunConfig, provenance: &[String], style: &Style
     } = style;
     println!("{bold}{cyan}Healthcare Billing Lifecycle Simulation{reset}");
     println!("{dim}{}{reset}", "─".repeat(72));
-    for (label, value) in banner_rows(cli, cfg, provenance) {
+    let mut rows = cfg.banner_rows();
+    rows.push(("config from".to_string(), provenance.join(" → ")));
+    for (label, value) in rows {
         println!("  {bold}{label:<22}{reset} {value}");
     }
     println!("{dim}{}{reset}\n", "─".repeat(72));
@@ -453,23 +438,5 @@ fn print_styled(text: &str, style: &Style) {
             Some(title) => println!("{}{}▌ {title}{}", style.bold, style.cyan, style.reset),
             None => println!("{line}"),
         }
-    }
-}
-
-/// Compact virtual-duration for dense table/banner lines ("3d", "4.5h").
-fn human_short(secs: f64) -> String {
-    match secs {
-        s if s >= 86_400.0 => format!("{:.0}d", s / 86_400.0),
-        s if s >= 3_600.0 => format!("{:.1}h", s / 3_600.0),
-        s if s >= 60.0 => format!("{:.1}m", s / 60.0),
-        s => format!("{s:.0}s"),
-    }
-}
-
-fn human_bytes(bytes: u64) -> String {
-    match bytes {
-        b if b >= 1_000_000 => format!("{:.1} MB", b as f64 / 1e6),
-        b if b >= 1_000 => format!("{:.1} kB", b as f64 / 1e3),
-        b => format!("{b} B"),
     }
 }

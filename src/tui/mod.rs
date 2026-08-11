@@ -1,9 +1,9 @@
-//! Interactive terminal UI: four panes on a numbered tab bar (←/→ or 1-4 to
-//! move), a live status box pinned to the bottom, and a `?` help overlay.
-//! Navigation is layered: Enter steps down (into a provider's A/R analysis
-//! or the A/R timeline scrubber), Esc steps back up — the top layer being
-//! the pane bar — and Ctrl-C is the only way out of the program (the plain
-//! report prints on the way).
+//! The interactive application shell: configure → run → explore → run again,
+//! all in one process. The program opens on a configuration form (every knob
+//! of the simulation editable with the arrow keys); Enter generates claims in
+//! memory and streams them straight into the simulation; the finished run
+//! opens a five-pane dashboard whose last pane is that same configuration
+//! form, so the next run is always one Enter away.
 //!
 //! Pane map — the reports arranged as one instrument, money views first,
 //! every pane scrollable by provider:
@@ -13,20 +13,21 @@
 //!                          books — what's still open, and what to chase first
 //!   3 Timeline             the run replayed as rate + backlog charts, per book
 //!   4 Payer Scorecard      graded payers + denial detail (scorecard ∪ denials)
+//!   5 Configuration        the startup form again — edit values, Enter reruns
 //!
 //! Threading: the TUI event loop owns the main thread on the *wall* clock;
-//! the simulation runs on its own multi-thread runtime behind a spawned
+//! each simulation runs on its own multi-thread runtime behind a spawned
 //! thread (DESIGN.md 'Virtual time' — time is computed, so claim tasks parallelize).
 //! They meet at two channels: the fold's live-progress watch tap, and a
-//! oneshot carrying the finished `RunOutput`.
+//! channel carrying the finished `RunOutput`.
 
 mod aging;
+mod config;
 mod insights;
 mod payers;
 mod theme;
 mod timeline;
 
-use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -37,75 +38,39 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Gauge, Paragraph, TableState, Tabs};
 use tokio::sync::watch;
 
-use healthcare_billing_sim::domain::{PayerId, human_virtual};
+use healthcare_billing_sim::RunOutput;
+use healthcare_billing_sim::domain::human_virtual;
 use healthcare_billing_sim::ledger::fold::Progress;
 use healthcare_billing_sim::ledger::records::ClaimState;
 use healthcare_billing_sim::reports::chase_list;
-use healthcare_billing_sim::sim::faults::FaultProfile;
-use healthcare_billing_sim::sim::payer::PayerConfig;
-use healthcare_billing_sim::{RunConfig, RunOutput};
+use healthcare_billing_sim::simconfig::SimConfig;
 
 use theme::{ACCENT, BAD, GOOD, WARN, bold, dim};
 
-pub struct TuiOptions {
-    /// Run-configuration banner as (label, value) rows — the same source of
-    /// truth main.rs prints to stdout.
-    pub banner_rows: Vec<(String, String)>,
-    pub seed: u64,
-    /// Worker threads for the sim runtime (0 = one per core).
-    pub threads: usize,
-}
-
-/// Run the simulation under the interactive UI and hand the finished output
-/// back so the caller can leave a plain-text record on stdout.
-pub fn run(mut cfg: RunConfig, opts: TuiOptions) -> anyhow::Result<RunOutput> {
-    // The Payer Scorecard pane shows configured personalities next to the
-    // observed statistics — capture them before cfg moves to the sim.
-    let payer_configs = cfg.payers.clone();
-    let payer_routes = cfg.payer_faults.clone();
-
-    let (progress_tx, progress_rx) = watch::channel(Progress::default());
-    cfg.progress = Some(progress_tx);
-    let (done_tx, done_rx) = mpsc::channel();
-    let threads = opts.threads;
-    let sim = std::thread::spawn(move || {
-        // Multi-thread runtime (DESIGN.md 'Virtual time'): nothing sleeps, so no paused
-        // clock — claim tasks execute in true parallel under the UI.
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        if threads > 0 {
-            builder.worker_threads(threads);
-        }
-        let result = builder
-            .enable_all()
-            .build()
-            .map_err(anyhow::Error::from)
-            .and_then(|rt| rt.block_on(healthcare_billing_sim::run(cfg)));
-        let _ = done_tx.send(result);
-    });
-
+/// Run the interactive session: configure, simulate, explore, repeat. Returns
+/// the most recently *completed* run (with the configuration that produced
+/// it) so the caller can leave a plain-text record on stdout — None if the
+/// user quit before any run finished.
+pub fn run(initial: SimConfig) -> anyhow::Result<Option<(SimConfig, RunOutput)>> {
     let mut terminal = ratatui::init();
-    let result = event_loop(
-        &mut terminal,
-        progress_rx,
-        &done_rx,
-        &opts,
-        payer_configs,
-        payer_routes,
-    );
+    let mut app = App::new(initial);
+    let result = event_loop(&mut terminal, &mut app);
     ratatui::restore();
-    let _ = sim.join();
-    result
+    result?;
+    Ok(app.into_record())
 }
 
 const AGING: usize = 0;
 const PROVIDERS: usize = 1;
 const PAYERS: usize = 3;
+const CONFIG: usize = 4;
 // Pane 2, Timeline, is the draw dispatch's wildcard arm.
-const PANE_TITLES: [&str; 4] = [
+const PANE_TITLES: [&str; 5] = [
     "A/R Aging",
     "Provider Insights",
     "Timeline",
     "Payer Scorecard",
+    "Configuration",
 ];
 
 /// One keys line, everywhere, always — the status box never rewords itself.
@@ -115,16 +80,46 @@ const KEYS_HINT: &str =
     "←/→ panes · ↑/↓ select · enter steps in · esc steps out · ? keys · ctrl-c quit";
 
 struct App {
-    banner_rows: Vec<(String, String)>,
-    seed: u64,
-    wall_start: Instant,
-    wall_done: Option<Duration>,
-    progress: Progress,
-    /// None while the simulation is still running.
-    done: Option<Done>,
+    /// The configuration, editable across the whole session; each run takes
+    /// a snapshot of it.
+    cfg: SimConfig,
+    form: config::Form,
+    phase: Phase,
+    /// The last completed run whose dashboard has been torn down by a rerun —
+    /// kept so Ctrl-C mid-rerun still leaves a record in the scrollback.
+    previous: Option<(SimConfig, RunOutput)>,
     pane: usize,
+    /// On the dashboard, the configuration pane's edit grab: Enter takes the
+    /// arrow keys for the form, Esc gives them back to the pane bar.
+    config_grabbed: bool,
     frame: usize,
     help: bool,
+}
+
+enum Phase {
+    /// The form owns the screen; no simulation yet.
+    Configure,
+    Running(Box<RunHandle>),
+    Dashboard(Box<DashState>),
+}
+
+/// A simulation in flight on its own thread + runtime.
+struct RunHandle {
+    /// The configuration this run was started with — the banner shows this,
+    /// not the live (possibly re-edited) form values.
+    snapshot: SimConfig,
+    progress_rx: watch::Receiver<Progress>,
+    done_rx: mpsc::Receiver<anyhow::Result<RunOutput>>,
+    thread: std::thread::JoinHandle<()>,
+    started: Instant,
+    progress: Progress,
+}
+
+struct DashState {
+    snapshot: SimConfig,
+    done: Done,
+    wall: Duration,
+    progress: Progress,
 }
 
 struct Done {
@@ -135,42 +130,76 @@ struct Done {
     insights: insights::Insights,
 }
 
-fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
-    mut progress_rx: watch::Receiver<Progress>,
-    done_rx: &mpsc::Receiver<anyhow::Result<RunOutput>>,
-    opts: &TuiOptions,
-    payer_configs: HashMap<PayerId, PayerConfig>,
-    payer_routes: HashMap<PayerId, FaultProfile>,
-) -> anyhow::Result<RunOutput> {
-    let mut app = App {
-        banner_rows: opts.banner_rows.clone(),
-        seed: opts.seed,
-        wall_start: Instant::now(),
-        wall_done: None,
-        progress: Progress::default(),
-        done: None,
-        pane: 0,
-        frame: 0,
-        help: false,
-    };
-
-    loop {
-        if app.done.is_none() {
-            app.progress = *progress_rx.borrow_and_update();
-            if let Ok(result) = done_rx.try_recv() {
-                let output = result?;
-                app.wall_done = Some(app.wall_start.elapsed());
-                app.progress = final_progress(&output);
-                app.done = Some(Done::build(
-                    output,
-                    payer_configs.clone(),
-                    payer_routes.clone(),
-                ));
-            }
+impl App {
+    fn new(cfg: SimConfig) -> App {
+        App {
+            cfg,
+            form: config::Form::default(),
+            phase: Phase::Configure,
+            previous: None,
+            pane: AGING,
+            config_grabbed: false,
+            frame: 0,
+            help: false,
         }
+    }
+
+    /// Launch a simulation from the current configuration. A dashboard being
+    /// torn down here parks its output in `previous` for the exit record.
+    fn start_run(&mut self) {
+        if let Phase::Dashboard(dash) = std::mem::replace(&mut self.phase, Phase::Configure) {
+            self.previous = Some((dash.snapshot, dash.done.output));
+        }
+        let snapshot = self.cfg.clone();
+        let (progress_tx, progress_rx) = watch::channel(Progress::default());
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut run_cfg = snapshot.to_run_config();
+        run_cfg.progress = Some(progress_tx);
+        let threads = snapshot.threads;
+        let thread = std::thread::spawn(move || {
+            // Multi-thread runtime (DESIGN.md 'Virtual time'): nothing sleeps, so no
+            // paused clock — claim tasks execute in true parallel under the UI.
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            if threads > 0 {
+                builder.worker_threads(threads);
+            }
+            let result = builder
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|rt| rt.block_on(healthcare_billing_sim::run(run_cfg)));
+            let _ = done_tx.send(result);
+        });
+        self.phase = Phase::Running(Box::new(RunHandle {
+            snapshot,
+            progress_rx,
+            done_rx,
+            thread,
+            started: Instant::now(),
+            progress: Progress::default(),
+        }));
+    }
+
+    fn into_record(self) -> Option<(SimConfig, RunOutput)> {
+        match self.phase {
+            Phase::Dashboard(dash) => {
+                let dash = *dash;
+                Some((dash.snapshot, dash.done.output))
+            }
+            // Quit mid-run or on the form: fall back to the last completed
+            // run, if any. A still-running sim thread is deliberately left
+            // behind — the process is exiting, and there is no cancel path
+            // by design (structural shutdown, no signals).
+            _ => self.previous,
+        }
+    }
+}
+
+fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> anyhow::Result<()> {
+    loop {
+        poll_run(app)?;
         app.frame = app.frame.wrapping_add(1);
-        terminal.draw(|frame| draw(frame, &mut app))?;
+        terminal.draw(|frame| draw(frame, app))?;
 
         if !event::poll(Duration::from_millis(50))? {
             continue;
@@ -180,23 +209,48 @@ fn event_loop(
         };
         // Terminals speaking an enhanced keyboard protocol report auto-repeat
         // as Repeat instead of a stream of Presses — treat both as a press so
-        // holding a key (the timeline scrubber's fast-forward included)
-        // behaves the same everywhere. Releases are noise.
+        // holding a key behaves the same everywhere. Releases are noise.
         if key.kind == KeyEventKind::Release {
             continue;
         }
-        if handle_key(&mut app, key.code, key.modifiers) {
-            match app.done {
-                Some(done) => return Ok(done.output),
-                None => anyhow::bail!("interrupted before the simulation finished"),
-            }
+        if handle_key(app, key.code, key.modifiers) {
+            return Ok(());
         }
     }
 }
 
+/// Check on a running simulation; on completion, swap the phase to the
+/// dashboard.
+fn poll_run(app: &mut App) -> anyhow::Result<()> {
+    let Phase::Running(running) = &mut app.phase else {
+        return Ok(());
+    };
+    running.progress = *running.progress_rx.borrow_and_update();
+    let Ok(result) = running.done_rx.try_recv() else {
+        return Ok(());
+    };
+    let Phase::Running(running) = std::mem::replace(&mut app.phase, Phase::Configure) else {
+        unreachable!("matched Running above");
+    };
+    let _ = running.thread.join();
+    let output = result?;
+    let progress = final_progress(&output);
+    let snapshot = running.snapshot;
+    let done = Done::build(output, &snapshot);
+    app.phase = Phase::Dashboard(Box::new(DashState {
+        snapshot,
+        done,
+        wall: running.started.elapsed(),
+        progress,
+    }));
+    app.pane = AGING;
+    app.config_grabbed = false;
+    Ok(())
+}
+
 /// Apply one keypress; returns true when the user asked to leave the UI.
-/// Only Ctrl-C quits — Enter steps down a layer, Esc steps back up, and at
-/// the top layer (the pane bar) Esc is a no-op.
+/// Only Ctrl-C quits — Enter steps down a layer (or starts a run), Esc steps
+/// back up, and at the top layer Esc is a no-op.
 fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
     // Ctrl-C always leaves, overlays or not — and nothing else does.
     if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
@@ -211,11 +265,72 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         app.help = true;
         return false;
     }
-    let Some(done) = &mut app.done else {
-        return false;
-    };
+    match app.phase {
+        Phase::Configure => configure_key(app, code),
+        Phase::Running(_) => {}
+        Phase::Dashboard(_) => dashboard_key(app, code),
+    }
+    false
+}
 
+/// The startup screen: the form owns every key.
+fn configure_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Up => app.form.move_cursor(&app.cfg, -1),
+        KeyCode::Down => app.form.move_cursor(&app.cfg, 1),
+        KeyCode::PageUp => app.form.move_cursor(&app.cfg, -10),
+        KeyCode::PageDown => app.form.move_cursor(&app.cfg, 10),
+        KeyCode::Left => app.form.adjust(&mut app.cfg, -1),
+        KeyCode::Right => app.form.adjust(&mut app.cfg, 1),
+        KeyCode::Enter => {
+            if matches!(app.form.enter(&app.cfg), config::EnterAction::StartRun) {
+                app.start_run();
+            }
+        }
+        KeyCode::Esc => {
+            app.form.escape(&app.cfg);
+        }
+        _ => {}
+    }
+}
+
+fn dashboard_key(app: &mut App, code: KeyCode) {
     let panes = PANE_TITLES.len();
+    // The configuration pane needs the arrow keys for value editing, so it
+    // follows the aging pane's grab grammar: ↑/↓ always move the field
+    // cursor, Enter grabs ←/→ for adjusting (and then starts the run), Esc
+    // hands them back to the pane bar.
+    if app.pane == CONFIG {
+        match code {
+            KeyCode::Char(c @ '1'..='5') => app.pane = c as usize - '1' as usize,
+            KeyCode::Up => app.form.move_cursor(&app.cfg, -1),
+            KeyCode::Down => app.form.move_cursor(&app.cfg, 1),
+            KeyCode::PageUp => app.form.move_cursor(&app.cfg, -10),
+            KeyCode::PageDown => app.form.move_cursor(&app.cfg, 10),
+            KeyCode::Left if app.config_grabbed => app.form.adjust(&mut app.cfg, -1),
+            KeyCode::Right if app.config_grabbed => app.form.adjust(&mut app.cfg, 1),
+            KeyCode::Left => app.pane = (app.pane + panes - 1) % panes,
+            KeyCode::Right => app.pane = (app.pane + 1) % panes,
+            KeyCode::Enter if app.config_grabbed => {
+                if matches!(app.form.enter(&app.cfg), config::EnterAction::StartRun) {
+                    app.start_run();
+                }
+            }
+            KeyCode::Enter => app.config_grabbed = true,
+            KeyCode::Esc => {
+                if !app.form.escape(&app.cfg) {
+                    app.config_grabbed = false;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    let Phase::Dashboard(dash) = &mut app.phase else {
+        return;
+    };
+    let done = &mut dash.done;
     match code {
         // While the A/R timeline is grabbed, ←/→ scrub the as-of day; the
         // pane bar gets them back when Esc lets go.
@@ -227,12 +342,10 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         }
         KeyCode::Left => app.pane = (app.pane + panes - 1) % panes,
         KeyCode::Right => app.pane = (app.pane + 1) % panes,
-        KeyCode::Char(c @ '1'..='4') => app.pane = c as usize - '1' as usize,
+        KeyCode::Char(c @ '1'..='5') => app.pane = c as usize - '1' as usize,
         KeyCode::Up if app.pane == PROVIDERS => done.insights.move_selection(-1, &done.output),
         KeyCode::Down if app.pane == PROVIDERS => done.insights.move_selection(1, &done.output),
-        KeyCode::PageUp if app.pane == PROVIDERS => {
-            done.insights.move_selection(-10, &done.output)
-        }
+        KeyCode::PageUp if app.pane == PROVIDERS => done.insights.move_selection(-10, &done.output),
         KeyCode::PageDown if app.pane == PROVIDERS => {
             done.insights.move_selection(10, &done.output)
         }
@@ -264,7 +377,6 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
         }
         _ => {}
     }
-    false
 }
 
 /// Advance a table selection by `delta`, clamped; returns true if it moved.
@@ -297,18 +409,20 @@ fn final_progress(output: &RunOutput) -> Progress {
 }
 
 impl Done {
-    fn build(
-        output: RunOutput,
-        payer_configs: HashMap<PayerId, PayerConfig>,
-        payer_routes: HashMap<PayerId, FaultProfile>,
-    ) -> Done {
+    fn build(output: RunOutput, snapshot: &SimConfig) -> Done {
         // The chase list feeds Provider Insights, which reads the drained
         // final books: what's still open at run completion is exactly the
         // pile a human has to work. (The A/R Aging pane keeps its own as-of
         // snapshot — mid-flight by default, scrubbable across the run.)
         let chase = chase_list(&output.ledger, output.finished_at, usize::MAX);
         let timeline = timeline::build(&output);
-        let payers = payers::build(&output, payer_configs, payer_routes);
+        // The Payer Scorecard pane shows configured personalities next to
+        // the observed statistics — from the snapshot that actually ran.
+        let payers = payers::build(
+            &output,
+            snapshot.payers.clone(),
+            snapshot.payer_faults.clone(),
+        );
         let aging = aging::build(&output);
         let insights = insights::Insights::build(&output, &chase);
         Done {
@@ -329,9 +443,22 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    match &mut app.done {
-        None => draw_running(frame, tabs_area, content, app),
-        Some(done) => {
+    match &mut app.phase {
+        Phase::Configure => {
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(
+                        " healthcare billing simulation — configure ",
+                        theme::accent_bold(),
+                    ),
+                    Span::styled("· enter starts the run", dim()),
+                ]),
+                tabs_area,
+            );
+            config::draw(frame, content, &app.cfg, &mut app.form, true);
+        }
+        Phase::Running(running) => draw_running(frame, tabs_area, content, running),
+        Phase::Dashboard(dash) => {
             // The active tab is a solid block, not just a tinted word: padded
             // numbered title, black-on-cyan, with the rest of the bar dimmed.
             let titles: Vec<Line> = PANE_TITLES
@@ -346,10 +473,12 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
                 .divider("");
             frame.render_widget(tabs, tabs_area);
 
+            let done = &mut dash.done;
             match app.pane {
                 AGING => aging::draw(frame, content, &mut done.aging, &done.output),
                 PAYERS => payers::draw(frame, content, &mut done.payers),
                 PROVIDERS => insights::draw(frame, content, &mut done.insights),
+                CONFIG => config::draw(frame, content, &app.cfg, &mut app.form, app.config_grabbed),
                 _ => timeline::draw(frame, content, &mut done.timeline),
             }
         }
@@ -361,9 +490,9 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     }
 }
 
-/// The waiting room: the run configuration under a live drain gauge, so the
-/// screen is telling the story before the first pane exists.
-fn draw_running(frame: &mut ratatui::Frame, tabs_area: Rect, content: Rect, app: &App) {
+/// The waiting room: the run's configuration under a live drain gauge, so
+/// the screen is telling the story before the first pane exists.
+fn draw_running(frame: &mut ratatui::Frame, tabs_area: Rect, content: Rect, running: &RunHandle) {
     frame.render_widget(
         Line::from(vec![
             Span::styled(
@@ -376,13 +505,14 @@ fn draw_running(frame: &mut ratatui::Frame, tabs_area: Rect, content: Rect, app:
     );
     let [banner_area, gauge_area] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).areas(content);
-    let banner_lines: Vec<Line> = app
-        .banner_rows
-        .iter()
+    let banner_lines: Vec<Line> = running
+        .snapshot
+        .banner_rows()
+        .into_iter()
         .map(|(label, value)| {
             Line::from(vec![
                 Span::styled(format!(" {label:<22} "), bold()),
-                Span::raw(value.clone()),
+                Span::raw(value),
             ])
         })
         .collect();
@@ -391,7 +521,7 @@ fn draw_running(frame: &mut ratatui::Frame, tabs_area: Rect, content: Rect, app:
         banner_area,
     );
 
-    let p = &app.progress;
+    let p = &running.progress;
     let settled = p.resolved + p.rejected + p.flagged;
     let ratio = if p.claims > 0 {
         (settled as f64 / p.claims as f64).clamp(0.0, 1.0)
@@ -412,8 +542,55 @@ fn draw_running(frame: &mut ratatui::Frame, tabs_area: Rect, content: Rect, app:
 
 fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     const FRAMES: [char; 4] = ['⠋', '⠙', '⠸', '⠴'];
-    let p = &app.progress;
-    let counts = vec![
+    let headline = match &app.phase {
+        Phase::Configure => vec![
+            Span::styled(" ✎ configure · ", theme::accent_bold()),
+            Span::raw(format!(
+                "{} claims ready to generate · seed {}",
+                theme::thousands(app.cfg.generator.count as u64),
+                app.cfg.seed,
+            )),
+            Span::styled(" · enter starts the simulation", dim()),
+        ],
+        Phase::Running(running) => {
+            let mut spans = vec![Span::styled(
+                format!(" {} running · ", FRAMES[app.frame % FRAMES.len()]),
+                theme::accent_bold(),
+            )];
+            spans.extend(progress_spans(&running.progress));
+            spans.push(Span::styled(
+                format!(" · {:.1}s wall", running.started.elapsed().as_secs_f64()),
+                dim(),
+            ));
+            spans
+        }
+        Phase::Dashboard(dash) => {
+            let mut spans = vec![Span::styled(" ✓ complete · ", theme::bold().fg(GOOD))];
+            spans.extend(progress_spans(&dash.progress));
+            spans.push(Span::styled(
+                format!(
+                    " · {:.2}s wall · seed {}",
+                    dash.wall.as_secs_f64(),
+                    dash.snapshot.seed
+                ),
+                dim(),
+            ));
+            spans
+        }
+    };
+    // The headline carries live state; the keys line is deliberately the
+    // same on every pane and in every phase — pane-specific instructions
+    // live in the hint row of the pane they belong to.
+    let status = Paragraph::new(vec![
+        Line::from(headline),
+        Line::from(Span::styled(format!(" {KEYS_HINT}"), dim())),
+    ])
+    .block(theme::panel("simulation"));
+    frame.render_widget(status, area);
+}
+
+fn progress_spans(p: &Progress) -> Vec<Span<'static>> {
+    vec![
         Span::styled(theme::thousands(p.claims as u64), bold()),
         Span::raw(" claims · "),
         Span::styled(
@@ -429,34 +606,7 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::styled(theme::thousands(p.flagged as u64), Style::default().fg(BAD)),
         Span::raw(" flagged · "),
         Span::raw(human_virtual(p.now.as_duration().as_secs_f64())),
-    ];
-    // The headline carries live state; the keys line is deliberately the
-    // same on every pane and in every phase — pane-specific instructions
-    // live in the hint row of the pane they belong to.
-    let mut headline = match app.wall_done {
-        None => vec![Span::styled(
-            format!(" {} running · ", FRAMES[app.frame % FRAMES.len()]),
-            theme::accent_bold(),
-        )],
-        Some(_) => vec![Span::styled(" ✓ complete · ", theme::bold().fg(GOOD))],
-    };
-    headline.extend(counts);
-    match app.wall_done {
-        None => headline.push(Span::styled(
-            format!(" · {:.1}s wall", app.wall_start.elapsed().as_secs_f64()),
-            dim(),
-        )),
-        Some(wall) => headline.push(Span::styled(
-            format!(" · {:.2}s wall · seed {}", wall.as_secs_f64(), app.seed),
-            dim(),
-        )),
-    }
-    let status = Paragraph::new(vec![
-        Line::from(headline),
-        Line::from(Span::styled(format!(" {KEYS_HINT}"), dim())),
-    ])
-    .block(theme::panel("simulation"));
-    frame.render_widget(status, area);
+    ]
 }
 
 /// The `?` overlay: every key in the app on one card.
@@ -472,7 +622,7 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
     let lines = vec![
         section("Everywhere"),
         key("←/→", "move between panes"),
-        key("1-4", "jump straight to a pane"),
+        key("1-5", "jump straight to a pane"),
         key("↑/↓", "scroll, or move the selection"),
         key("pgup/pgdn", "the same, ten at a time"),
         key("enter", "step down a layer — select, grab, drill in"),
@@ -481,6 +631,19 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
             "step back up a layer — the top layer is the pane bar",
         ),
         key("ctrl-c", "quit — the plain report prints to stdout"),
+        Line::default(),
+        section("Configuration (startup screen, and pane 5)"),
+        key("↑/↓", "move between fields"),
+        key(
+            "←/→",
+            "adjust the selected value (on pane 5: after enter grabs)",
+        ),
+        key(
+            "enter",
+            "payer rows expand; anywhere else starts the simulation",
+        ),
+        key("esc", "collapse a payer, then hand the arrows back"),
+        note("presets rewrite the fault fields in place; edits flip the label to 'custom'"),
         Line::default(),
         section("1 A/R Aging"),
         key("↑/↓", "pick a book — all providers first, then each one"),
@@ -495,7 +658,6 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         key("↑/↓", "pick a provider; the analysis follows"),
         key("enter", "into the analysis document; ↑/↓ scroll it"),
         key("esc", "back up to the provider list"),
-        note("every figure computed from the drained final books — nothing generated"),
         Line::default(),
         section("3 Timeline"),
         key("↑/↓", "pick a book — the charts re-bucket to its claims"),
@@ -507,7 +669,7 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         Line::default(),
         Line::from(Span::styled("   any key closes this card", dim())),
     ];
-    let popup = theme::popup(area, 74, lines.len() as u16 + 2);
+    let popup = theme::popup(area, 78, lines.len() as u16 + 2);
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines)
@@ -517,20 +679,19 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
 }
 
 /// Render smoke tests: run a real (small, messy) simulation and draw every
-/// pane and overlay into a TestBackend — the closest an automated check gets
-/// to pressing the keys. A panic anywhere in layout/formatting fails here.
+/// phase, pane and overlay into a TestBackend — the closest an automated
+/// check gets to pressing the keys. A panic anywhere in layout/formatting
+/// fails here.
 #[cfg(test)]
 mod render_tests {
-    use std::io::Write as _;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use serde_json::json;
 
-    use super::*;
+    use healthcare_billing_sim::ClaimSource;
+    use healthcare_billing_sim::simconfig::Preset;
 
-    static INPUT_ID: AtomicUsize = AtomicUsize::new(0);
+    use super::*;
 
     fn claim_line(i: usize) -> String {
         let payers = ["medicare", "anthem", "aetna", "cigna", "humana"];
@@ -554,44 +715,48 @@ mod render_tests {
         .to_string()
     }
 
-    /// A finished App over a real messy run: 40 claims across five payers,
-    /// ingested fast enough that receivables are still open at intake end.
-    fn done_app() -> App {
-        let unique = INPUT_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "tui-render-test-{}-{unique}.jsonl",
-            std::process::id()
-        ));
-        let mut file = std::fs::File::create(&path).expect("create input");
-        for i in 0..40 {
-            writeln!(file, "{}", claim_line(i)).expect("write input");
+    /// A small messy configuration whose run finishes in well under a second.
+    fn small_cfg() -> SimConfig {
+        SimConfig {
+            seed: 7,
+            rate_per_sec: 10.0,
+            generator: healthcare_billing_sim::claimgen::GenConfig {
+                count: 40,
+                malformed_rate: 0.0,
+                ..Default::default()
+            },
+            ..SimConfig::default()
         }
-        let mut cfg = RunConfig::new(path, 7, 10.0);
-        healthcare_billing_sim::scenario::preset("messy")
-            .expect("preset exists")
-            .apply(&mut cfg);
-        let configs = cfg.payers.clone();
-        let routes = cfg.payer_faults.clone();
+    }
+
+    /// A finished App over a real messy run: 40 in-memory claims across five
+    /// payers, ingested fast enough that receivables are still open at
+    /// intake end. No file anywhere.
+    fn done_app() -> App {
+        let cfg = small_cfg();
+        let lines: Vec<String> = (0..40).map(claim_line).collect();
+        let mut run_cfg = cfg.to_run_config();
+        run_cfg.source = ClaimSource::Lines(lines);
         let output = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("runtime")
-            .block_on(healthcare_billing_sim::run(cfg))
+            .block_on(healthcare_billing_sim::run(run_cfg))
             .expect("run");
-        App {
-            banner_rows: vec![
-                ("input".to_string(), "test.jsonl".to_string()),
-                ("seed".to_string(), "7".to_string()),
-            ],
-            seed: 7,
-            wall_start: Instant::now(),
-            wall_done: Some(Duration::from_secs(1)),
-            progress: final_progress(&output),
-            done: Some(Done::build(output, configs, routes)),
-            pane: 0,
-            frame: 0,
-            help: false,
-        }
+        dashboard_app(cfg, output)
+    }
+
+    fn dashboard_app(cfg: SimConfig, output: RunOutput) -> App {
+        let progress = final_progress(&output);
+        let done = Done::build(output, &cfg);
+        let mut app = App::new(cfg.clone());
+        app.phase = Phase::Dashboard(Box::new(DashState {
+            snapshot: cfg,
+            done,
+            wall: Duration::from_secs(1),
+            progress,
+        }));
+        app
     }
 
     fn render(app: &mut App) -> String {
@@ -617,6 +782,7 @@ mod render_tests {
             "Providers —",
             "Backlog",
             "Configured —",
+            "start simulation",
         ];
         for (pane, marker) in markers.iter().enumerate() {
             app.pane = pane;
@@ -646,14 +812,15 @@ mod render_tests {
         // for a single provider.
         app.pane = AGING;
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        let selected = app
-            .done
-            .as_ref()
-            .expect("done")
-            .aging
-            .selected_name()
-            .expect("a provider row")
-            .to_string();
+        let selected = match &app.phase {
+            Phase::Dashboard(dash) => dash
+                .done
+                .aging
+                .selected_name()
+                .expect("a provider row")
+                .to_string(),
+            _ => unreachable!(),
+        };
         let text = render(&mut app);
         assert!(
             text.contains(&format!("A/R Aging — {selected}")),
@@ -667,14 +834,15 @@ mod render_tests {
         // The timeline pane re-buckets its charts for a single provider.
         app.pane = 2;
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        let selected = app
-            .done
-            .as_ref()
-            .expect("done")
-            .timeline
-            .selected_name()
-            .expect("a provider row")
-            .to_string();
+        let selected = match &app.phase {
+            Phase::Dashboard(dash) => dash
+                .done
+                .timeline
+                .selected_name()
+                .expect("a provider row")
+                .to_string(),
+            _ => unreachable!(),
+        };
         let text = render(&mut app);
         assert!(
             text.contains(&format!("{selected} — ingested")),
@@ -683,13 +851,62 @@ mod render_tests {
     }
 
     #[test]
-    fn running_screen_renders_banner_and_gauge() {
-        let mut app = done_app();
-        app.done = None;
-        app.wall_done = None;
+    fn configure_screen_renders_the_form() {
+        let mut app = App::new(SimConfig::default());
         let text = render(&mut app);
-        assert!(text.contains("run configuration"));
-        assert!(text.contains("terminal state"));
+        assert!(text.contains("start simulation"), "{text}");
+        assert!(text.contains("claims to generate"), "{text}");
+        assert!(text.contains("clearinghouse faults"), "{text}");
+        assert!(text.contains("configure"), "{text}");
+    }
+
+    #[test]
+    fn enter_on_the_form_runs_the_simulation_to_a_dashboard() {
+        let mut app = App::new(small_cfg());
+        assert!(matches!(app.phase, Phase::Configure));
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            matches!(app.phase, Phase::Running(_)),
+            "enter on the start row must launch the run"
+        );
+        wait_for_dashboard(&mut app);
+        let text = render(&mut app);
+        assert!(text.contains("A/R Aging — all providers"), "{text}");
+
+        // Rerun from pane 5: grab the form, press enter on the start row.
+        app.pane = CONFIG;
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE); // grab
+        assert!(app.config_grabbed);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE); // start
+        assert!(matches!(app.phase, Phase::Running(_)));
+        assert!(
+            app.previous.is_some(),
+            "the torn-down dashboard must be kept for the exit record"
+        );
+        wait_for_dashboard(&mut app);
+        assert!(matches!(app.phase, Phase::Dashboard(_)));
+        assert!(app.into_record().is_some());
+    }
+
+    fn wait_for_dashboard(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(app.phase, Phase::Dashboard(_)) {
+            assert!(Instant::now() < deadline, "run did not finish in 30s");
+            poll_run(app).expect("run failed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn running_screen_renders_banner_and_gauge() {
+        let mut app = App::new(small_cfg());
+        // A run handle whose simulation is real but tiny; render before it
+        // finishes as well as after — both must lay out.
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let text = render(&mut app);
+        assert!(text.contains("run configuration"), "{text}");
+        assert!(text.contains("terminal state"), "{text}");
+        wait_for_dashboard(&mut app);
     }
 
     #[test]
@@ -698,11 +915,13 @@ mod render_tests {
         handle_key(&mut app, KeyCode::Char('4'), KeyModifiers::NONE);
         assert_eq!(app.pane, PAYERS);
         handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(
-            app.done.as_ref().expect("done").payers.table.selected(),
-            Some(1)
-        );
+        match &app.phase {
+            Phase::Dashboard(dash) => assert_eq!(dash.done.payers.table.selected(), Some(1)),
+            _ => unreachable!(),
+        }
         // Right from the last pane wraps around to the first.
+        handle_key(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
+        assert_eq!(app.pane, CONFIG);
         handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
         assert_eq!(app.pane, AGING);
         handle_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE);
@@ -723,10 +942,40 @@ mod render_tests {
     }
 
     #[test]
+    fn config_pane_edits_only_while_grabbed() {
+        let mut app = done_app();
+        app.pane = CONFIG;
+        let seed_before = app.cfg.seed;
+        // Ungrabbed: ←/→ still switch panes.
+        handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.pane, AGING);
+        app.pane = CONFIG;
+        // Grab, walk to the seed field, adjust it.
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let rows = app.form.rows(&app.cfg);
+        let seed_row = rows
+            .iter()
+            .position(|r| *r == config::Row::Field(config::FieldId::Seed))
+            .expect("seed row");
+        app.form.cursor = seed_row;
+        handle_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.cfg.seed, seed_before + 1);
+        assert_eq!(app.pane, CONFIG, "grabbed arrows must not switch panes");
+        // Esc releases the grab; the pane bar gets the arrows back.
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.config_grabbed);
+        handle_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.pane, PAYERS);
+    }
+
+    #[test]
     fn enter_grabs_the_aging_timeline_and_esc_lets_go() {
         let mut app = done_app();
         app.pane = AGING;
-        let grabbed = |app: &App| app.done.as_ref().expect("done").aging.timeline_grabbed();
+        let grabbed = |app: &App| match &app.phase {
+            Phase::Dashboard(dash) => dash.done.aging.timeline_grabbed(),
+            _ => unreachable!(),
+        };
 
         // Enter grabs the timeline: ←/→ scrub the as-of day, not the panes.
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -751,8 +1000,14 @@ mod render_tests {
     fn insights_enter_steps_down_and_esc_steps_up() {
         let mut app = done_app();
         app.pane = PROVIDERS;
-        let focus = |app: &App| app.done.as_ref().expect("done").insights.focus;
-        let scroll = |app: &App| app.done.as_ref().expect("done").insights.scroll;
+        let focus = |app: &App| match &app.phase {
+            Phase::Dashboard(dash) => dash.done.insights.focus,
+            _ => unreachable!(),
+        };
+        let scroll = |app: &App| match &app.phase {
+            Phase::Dashboard(dash) => dash.done.insights.scroll,
+            _ => unreachable!(),
+        };
 
         assert!(matches!(focus(&app), insights::Focus::Providers));
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -772,11 +1027,33 @@ mod render_tests {
         assert!(!handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(focus(&app), insights::Focus::Providers));
     }
+
+    #[test]
+    fn a_messy_preset_default_config_runs_generated_claims() {
+        // The product path end to end: SimConfig → generated source → run.
+        let mut cfg = small_cfg();
+        cfg.generator.count = 60;
+        cfg.generator.malformed_rate = 0.05;
+        cfg.apply_preset(Preset::Messy);
+        let output = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(healthcare_billing_sim::run(cfg.to_run_config()))
+            .expect("run");
+        assert!(!output.ledger.claims.is_empty());
+        let mut app = dashboard_app(cfg, output);
+        for pane in 0..PANE_TITLES.len() {
+            app.pane = pane;
+            render(&mut app);
+        }
+    }
 }
 
 /// Dev preview, not a check: `cargo test -- --ignored dump_frames` renders
-/// every pane and overlay over the real 10k sample into target/frames/*.txt
-/// — the fastest way to eyeball a layout change without a terminal session.
+/// every phase, pane and overlay over the default 10k generated run into
+/// target/frames/*.txt — the fastest way to eyeball a layout change without
+/// a terminal session.
 #[cfg(test)]
 mod frame_dump {
     use ratatui::Terminal;
@@ -802,34 +1079,39 @@ mod frame_dump {
     #[test]
     #[ignore]
     fn dump_frames() {
-        let mut cfg = RunConfig::new("data/sample_claims_10k.jsonl".into(), 42, 0.0004);
-        healthcare_billing_sim::scenario::preset("messy")
-            .expect("preset")
-            .apply(&mut cfg);
-        let configs = cfg.payers.clone();
-        let routes = cfg.payer_faults.clone();
+        let cfg = SimConfig::default();
         let output = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("rt")
-            .block_on(healthcare_billing_sim::run(cfg))
+            .block_on(healthcare_billing_sim::run(cfg.to_run_config()))
             .expect("run");
-        let mut app = App {
-            banner_rows: vec![(
-                "input".to_string(),
-                "data/sample_claims_10k.jsonl (3.2 MB)".to_string(),
-            )],
-            seed: 42,
-            wall_start: Instant::now(),
-            wall_done: Some(Duration::from_secs(2)),
-            progress: final_progress(&output),
-            done: Some(Done::build(output, configs, routes)),
-            pane: 0,
-            frame: 0,
-            help: false,
-        };
+        let progress = final_progress(&output);
+        let done = Done::build(output, &cfg);
+        let mut app = App::new(cfg.clone());
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/frames");
         std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // The configure screen, collapsed and with a payer expanded.
+        dump(&mut app, &dir, "configure");
+        app.form.cursor = app
+            .form
+            .rows(&app.cfg)
+            .iter()
+            .position(|r| matches!(r, config::Row::PayerHeader(_)))
+            .expect("payer row");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        // Enter on a payer row expands it rather than starting a run, so the
+        // app is still on the configure screen here.
+        dump(&mut app, &dir, "configure-payer-expanded");
+        app.form = config::Form::default();
+
+        app.phase = Phase::Dashboard(Box::new(DashState {
+            snapshot: cfg,
+            done,
+            wall: Duration::from_secs(2),
+            progress,
+        }));
         for pane in 0..PANE_TITLES.len() {
             app.pane = pane;
             dump(&mut app, &dir, &format!("pane{pane}"));
