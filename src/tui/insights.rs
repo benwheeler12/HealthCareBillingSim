@@ -1,7 +1,10 @@
-//! The Provider Insights pane: a master–detail view. Providers on the left
-//! (biggest book of open money first) drive the claims table on the right;
-//! Tab or Enter hops focus between the two, c/a/r re-sorts the claims, and
-//! Enter on a claim opens its full audit trail.
+//! The Provider Insights pane: a master–detail view over the **drained
+//! final books** — what is still open when the run completes is exactly the
+//! pile a human has to work. Providers on the left (biggest book of open
+//! money first) drive the claims table on the right. Navigation is layered:
+//! Enter steps down (provider → their claims → a claim's audit trail), Esc
+//! steps back up (the top layer being the pane bar), and c/a/r re-sorts the
+//! claims.
 
 use std::collections::HashMap;
 
@@ -16,7 +19,8 @@ use healthcare_billing_sim::reports::chase::ChaseItem;
 use super::theme::{self, ACCENT, ALERT, WARN, bold, dim, money};
 
 /// Master–detail state: a provider list on the left drives a claims table on
-/// the right; Tab (or Enter on a provider) moves focus right, Tab toggles back.
+/// the right; Enter on a provider moves focus down into their claims, Esc
+/// steps back up to the providers.
 pub struct Insights {
     /// Aggregated per organization, sorted by total outstanding desc.
     providers: Vec<ProviderRow>,
@@ -117,11 +121,16 @@ impl Insights {
         }
     }
 
-    pub fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Providers => Focus::Claims,
-            Focus::Claims => Focus::Providers,
-        };
+    /// Esc: one layer back up. Returns false when already at the base layer
+    /// (provider list), where ←/→ already control the pane bar.
+    pub fn escape(&mut self) -> bool {
+        match self.focus {
+            Focus::Claims => {
+                self.focus = Focus::Providers;
+                true
+            }
+            Focus::Providers => false,
+        }
     }
 
     /// Toggle direction when the active key is pressed again; switch keys
@@ -184,16 +193,19 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, ins: &mut Insights, chase: &
     frame.render_widget(
         theme::keys_hint(&[
             ("↑/↓", "select"),
-            ("tab / enter", "hop to the other table"),
+            (
+                "enter",
+                "step down — into the claims, then a claim's audit trail",
+            ),
+            ("esc", "step back up"),
             ("c a r", "sort claims by cost/age/risk (again flips)"),
-            ("enter", "on a claim: full audit trail"),
         ]),
         hint_area,
     );
 
     if ins.providers.is_empty() {
         frame.render_widget(
-            Paragraph::new("nothing outstanding — all receivables booked")
+            Paragraph::new("nothing outstanding at run completion — every receivable booked")
                 .block(theme::panel("Provider Insights")),
             body,
         );
@@ -236,13 +248,16 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, ins: &mut Insights, chase: &
     )
     .header(Row::new(["provider", "open", "outstanding"]).style(bold()))
     .block(
-        theme::panel(format!("Providers — {} with open A/R", ins.providers.len()))
-            .title_bottom(position(&ins.provider_table, ins.providers.len()))
-            .border_style(if provider_focused {
-                focus_style
-            } else {
-                blur_style
-            }),
+        theme::panel(format!(
+            "Providers — {} with A/R open at run end",
+            ins.providers.len()
+        ))
+        .title_bottom(position(&ins.provider_table, ins.providers.len()))
+        .border_style(if provider_focused {
+            focus_style
+        } else {
+            blur_style
+        }),
     )
     .row_highlight_style(highlight)
     .highlight_symbol(if provider_focused { "▶ " } else { "  " });

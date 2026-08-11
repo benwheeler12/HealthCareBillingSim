@@ -80,11 +80,8 @@ pub async fn run_fold(
 ///   stable sort exactly — original index preserves each claim's causal
 ///   order across identical timestamps — followed by one permutation pass
 ///   that moves each fat event once.
-/// - The snapshot is a per-claim replay of that claim's own history up to
-///   the mark. Claims are independent (the property the whole experiment
-///   rests on), so the rebuild is embarrassingly parallel. Events AT the
-///   mark are the final intake instant's own (the last Ingested rows land
-///   exactly there) and belong inside.
+/// - The snapshot is [`snapshot_at`] at the intake mark: the last Ingested
+///   rows land exactly there, so every claim exists in the snapshot.
 pub fn finalize(mut ledger: Ledger, intake_mark: VirtualTime) -> FoldOutput {
     use rayon::prelude::*;
 
@@ -104,38 +101,47 @@ pub fn finalize(mut ledger: Ledger, intake_mark: VirtualTime) -> FoldOutput {
         })
         .collect();
 
+    let intake_snapshot = snapshot_at(&ledger, intake_mark);
+    FoldOutput {
+        ledger,
+        intake_snapshot,
+    }
+}
+
+/// Rebuild the books as they stood at any `mark` — the event-sourcing way: a
+/// per-claim replay of that claim's own history up to the mark, through the
+/// same `apply` the live fold uses (correctness by construction). Claims are
+/// independent, so the rebuild is embarrassingly parallel. Events AT the
+/// mark belong inside; claims first ingested after the mark don't exist yet
+/// and are omitted. The interactive UI's A/R time scrubber calls this per
+/// day step, so it stays cheap: one pass over each claim's history.
+pub fn snapshot_at(ledger: &Ledger, mark: VirtualTime) -> Ledger {
+    use rayon::prelude::*;
+
     let claims = ledger
         .claims
         .par_iter()
-        .map(|(claim_id, record)| {
-            // Replay this claim's history through the same `apply` the live
-            // fold uses — correctness by construction, one claim at a time.
+        .filter_map(|(claim_id, record)| {
             let mut mini = Ledger::default();
-            for event in record.history.iter().filter(|e| e.at <= intake_mark) {
+            for event in record.history.iter().filter(|e| e.at <= mark) {
                 mini.apply(event.clone());
             }
-            let rebuilt = mini
-                .claims
+            mini.claims
                 .remove(claim_id)
-                .expect("every claim is ingested at or before the intake mark");
-            (claim_id.clone(), rebuilt)
+                .map(|rebuilt| (claim_id.clone(), rebuilt))
         })
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
-    let intake_snapshot = Ledger {
+    Ledger {
         claims,
         quarantine: ledger
             .quarantine
             .iter()
-            .filter(|e| e.at <= intake_mark)
+            .filter(|e| e.at <= mark)
             .cloned()
             .collect(),
         event_log: Vec::new(),
-    };
-    FoldOutput {
-        ledger,
-        intake_snapshot,
     }
 }
 

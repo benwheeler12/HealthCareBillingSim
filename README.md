@@ -48,15 +48,25 @@ numbered tab bar, money views first — ←/→ (or 1–4) to move between
 **A/R Aging**, **Payer Scorecard**, **Provider Insights**, and
 **Timeline**; ↑/↓ scrolls (or selects rows in the focused list), `?`
 opens a keyboard map, and each pane carries its own hint row at the top
-while the status box at the bottom never changes its text. Every report
-pane is scrollable by provider. The run opens on the **A/R Aging pane**,
-a master–detail view: a provider list on the left (the whole portfolio
+while the status box at the bottom never changes its text. Navigation is
+layered: **Enter steps down** into the next layer of the UI (a
+provider's claims, a claim's audit trail, the aging timeline) and
+**Esc steps back up**, the top layer being the pane bar itself. Every
+report pane is scrollable by provider. The run opens on the **A/R Aging
+pane**, a master–detail view of the books **as of one moment in virtual
+time** (the end of intake by default — the mid-flight view a biller
+actually lives in): a provider list on the left (the whole portfolio
 first, then each billing organization by open payer A/R) drives the
 report on the right — the outcome bars up top (a claims funnel and a
-money waterfall as proportional bars, from the drained final books) over
-the aging tables, buckets colored green → red with a per-payer mix bar,
-all recomputed for whichever book is selected; Tab hops focus so ↑/↓ can
-either change the provider or scroll the report. The **Payer Scorecard
+money waterfall as proportional bars) over the aging tables, buckets
+colored green → red with a per-payer mix bar, every number derived from
+the same as-of snapshot and recomputed for whichever book is selected;
+Tab hops focus so ↑/↓ can either change the provider or scroll the
+report. Enter grabs the **timeline scrubber**: ←/→ then move the as-of
+moment a virtual day at a time across the whole run — the books are
+replayed from the event log to that day, so the bars, tables, and
+provider list all animate through time — and Esc hands the arrows back
+to the pane bar. The **Payer Scorecard
 pane** merges the scorecard and denial reports into a league table
 graded on the curve (A–F from denial rate, response time, and paid
 share, best to worst, with inline bars); ↑/↓ picks a payer and two stat
@@ -72,23 +82,26 @@ rises through intake and drains to zero: the correctness guarantee as a
 picture, replayed from the retained event log and re-bucketed for
 whichever organization is selected (every timeline shares the
 portfolio's x-axis, so shapes stay comparable). The **Provider Insights
-pane** is a master–detail view: scroll a list of billing
-organizations (100 in the sample, sorted by total outstanding) and the
-panel beside it live-updates with that provider's open claims —
-outstanding, age, and a risk score (dollars × days stuck), sortable by
-**c**ost, **a**ge, or **r**isk in either direction (press the key again
-to flip). Statuses are plain English, derived from the claim's evidence —
-"awaiting 1st response", "retrying (attempt 3)", "partial remit (2/4
-lines)", "flagged: doesn't sum (short $0.83)", "flagged: no response,
-gave up". Tab (or Enter on a provider) moves focus into the claims list;
-**Enter on a claim opens its full audit trail** — every event with
-virtual timestamps, straight from the event-sourced ledger, plus a
-what-this-means paragraph explaining the claim's status in simulation
-terms (why silence is ambiguous, why disputed figures are never booked).
-A live status
+pane** is a master–detail view over the **drained final books** — what
+is still open when the run completes is exactly the pile a human has to
+work: scroll a list of billing organizations (sorted by total
+outstanding at run end) and the panel beside it live-updates with that
+provider's open claims — outstanding, age, and a risk score (dollars ×
+days stuck), sortable by **c**ost, **a**ge, or **r**isk in either
+direction (press the key again to flip). Statuses are plain English,
+derived from the claim's evidence — "awaiting 1st response", "retrying
+(attempt 3)", "partial remit (2/4 lines)", "flagged: doesn't sum (short
+$0.83)", "flagged: no response, gave up". Enter on a provider steps
+down into their claims; **Enter on a claim opens its full audit
+trail** — every event with virtual timestamps, straight from the
+event-sourced ledger, plus a what-this-means paragraph explaining the
+claim's status in simulation terms (why silence is ambiguous, why
+disputed figures are never booked) — and Esc steps back up a layer at a
+time. A live status
 box pinned to the bottom shows claims/resolved/rejected/flagged, the
 virtual clock, and wall time (plus a drain gauge while the run is in
-flight). `q` quits and prints the plain report so a record stays in your
+flight). Ctrl-C is the only way to quit; on the way out the plain
+report prints so a record stays in your
 scrollback. When stdout is not a terminal (pipes, CI) or with `--no-tui`,
 output is the plain sequential report — that path still prints every
 report, including the full configuration banner, the standalone denial
