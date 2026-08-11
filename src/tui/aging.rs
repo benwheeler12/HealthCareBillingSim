@@ -3,20 +3,22 @@
 //! then each billing organization by open payer A/R) drives the report on
 //! the right — the outcome bars (claims funnel + money waterfall) above the
 //! aging tables with their colored buckets and mix bars, every number
-//! derived from the same as-of snapshot. The view opens at the end of
-//! intake (the mid-flight moment a biller actually lives in); Enter grabs
-//! the timeline so ←/→ scrub the as-of day across the whole run, and Esc
+//! derived from the same as-of snapshot, with the timeline scrubber pinned
+//! at the bottom of that same window. The view opens at the end of intake
+//! (the mid-flight moment a biller actually lives in); Enter grabs the
+//! timeline so ←/→ scrub the as-of day across the whole run — hold an arrow
+//! for a second and the scrub fast-forwards to four days per step — and Esc
 //! lets go. Tab hops focus so ↑/↓ can either change the selection or scroll
 //! the report.
 
 use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Row, Table, TableState};
+use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
 use healthcare_billing_sim::RunOutput;
 use healthcare_billing_sim::domain::{Money, PayerId, VirtualTime};
@@ -37,6 +39,63 @@ const MIX_WIDTH: usize = 12;
 
 const VIRTUAL_DAY: Duration = Duration::from_secs(86_400);
 
+/// A held arrow reaches the TUI as a stream of ordinary key events (terminal
+/// auto-repeat) — presses in the same direction closer together than this
+/// belong to one hold. The bound also clears most terminals' initial repeat
+/// delay, so a hold survives its own start.
+const REPEAT_GAP: Duration = Duration::from_millis(600);
+/// Hold an arrow this long and the scrub shifts into fast-forward…
+const TURBO_AFTER: Duration = Duration::from_secs(1);
+/// …stepping this many virtual days per repeat instead of one.
+const TURBO_DAYS: u32 = 4;
+
+/// Hold detection for the timeline scrubber, inferred purely from key
+/// cadence — legacy terminals never send key-up, so the release is the
+/// silence after the last repeat.
+#[derive(Default)]
+struct Hold(Option<HoldState>);
+
+#[derive(Clone, Copy)]
+struct HoldState {
+    dir: isize,
+    started: Instant,
+    last: Instant,
+}
+
+impl Hold {
+    /// Record one press and return how many days it steps: 1, or
+    /// `TURBO_DAYS` once the hold is `TURBO_AFTER` old. A direction flip or
+    /// a gap longer than auto-repeat starts a fresh hold.
+    fn press(&mut self, dir: isize, now: Instant) -> u32 {
+        match &mut self.0 {
+            Some(h) if h.dir == dir && now.duration_since(h.last) <= REPEAT_GAP => {
+                h.last = now;
+                if now.duration_since(h.started) >= TURBO_AFTER {
+                    TURBO_DAYS
+                } else {
+                    1
+                }
+            }
+            _ => {
+                self.0 = Some(HoldState {
+                    dir,
+                    started: now,
+                    last: now,
+                });
+                1
+            }
+        }
+    }
+
+    /// Is fast-forward engaged right now? Drives the ×4 badge, which decays
+    /// on its own once the repeats stop arriving.
+    fn turbo(&self, now: Instant) -> bool {
+        self.0.is_some_and(|h| {
+            now.duration_since(h.last) <= REPEAT_GAP && now.duration_since(h.started) >= TURBO_AFTER
+        })
+    }
+}
+
 pub struct AgingView {
     /// Row 0 is the whole portfolio; the rest are every organization on the
     /// books, ordered by open payer A/R at the end of intake — the order
@@ -48,6 +107,8 @@ pub struct AgingView {
     /// list, outcome bars, aging tables) derives from this one snapshot.
     books: Ledger,
     as_of: VirtualTime,
+    /// Cadence tracker for held ←/→ while the timeline is grabbed.
+    hold: Hold,
     /// The aging document for the current selection, rebuilt on move.
     doc: Vec<Line<'static>>,
     pub scroll: u16,
@@ -116,6 +177,7 @@ pub fn build(output: &RunOutput) -> AgingView {
         focus: Focus::Providers,
         books,
         as_of,
+        hold: Hold::default(),
         doc: Vec::new(),
         scroll: 0,
     };
@@ -198,14 +260,16 @@ impl AgingView {
     }
 
     /// ←/→ while the timeline is grabbed: move the as-of moment one virtual
-    /// day, clamped to [t+0, run completion], and re-derive everything from
-    /// the books as they stood then.
+    /// day — four once the key has been held for a second — clamped to
+    /// [t+0, run completion], and re-derive everything from the books as
+    /// they stood then.
     pub fn step_day(&mut self, delta: isize, output: &RunOutput) {
+        let step = VIRTUAL_DAY * self.hold.press(delta.signum(), Instant::now());
         let current = self.as_of.as_duration();
         let next = if delta < 0 {
-            current.saturating_sub(VIRTUAL_DAY)
+            current.saturating_sub(step)
         } else {
-            (current + VIRTUAL_DAY).min(output.finished_at.as_duration())
+            (current + step).min(output.finished_at.as_duration())
         };
         if next == current {
             return;
@@ -459,22 +523,20 @@ fn row(label: &str, b: &AgingBuckets, emphasize: bool) -> Line<'static> {
 }
 
 pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut AgingView, output: &RunOutput) {
-    let [hint_area, timeline_area, body] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(4),
-    ])
-    .areas(area);
+    let [hint_area, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(4)]).areas(area);
     frame.render_widget(
         theme::keys_hint(&[
             ("↑/↓", "pick a provider (all providers first)"),
             ("tab", "hop over to scroll the tables"),
-            ("enter", "grab the timeline — ←/→ move a day, esc lets go"),
+            (
+                "enter",
+                "grab the timeline — ←/→ move a day (hold: ×4), esc lets go",
+            ),
             ("green → red", "receivables aging past 90 days"),
         ]),
         hint_area,
     );
-    frame.render_widget(timeline_line(view, output), timeline_area);
 
     let [left, right] =
         Layout::horizontal([Constraint::Length(48), Constraint::Min(40)]).areas(body);
@@ -533,24 +595,46 @@ pub fn draw(frame: &mut ratatui::Frame, area: Rect, view: &mut AgingView, output
         .selected_name()
         .map(str::to_string)
         .unwrap_or_else(|| "all providers".to_string());
-    let doc = view.doc.clone();
-    theme::scrolled_paragraph(
-        frame,
-        right,
+    let mut block =
         theme::panel(format!("A/R Aging — {scope}")).border_style(if view.focus == Focus::Tables {
             focus_style
         } else {
             blur_style
-        }),
-        &doc,
-        &mut view.scroll,
+        });
+    // The timeline scrubber lives inside this window, pinned under the
+    // report it drives: the inner area splits into the scrolling document
+    // and one always-visible scrubber row at the bottom.
+    let inner = block.inner(right);
+    let [doc_area, scrubber_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+    let visible = doc_area.height;
+    let max = (view.doc.len() as u16).saturating_sub(visible);
+    view.scroll = view.scroll.min(max);
+    if max > 0 {
+        let last = (view.scroll + visible).min(view.doc.len() as u16);
+        block = block.title_bottom(
+            Line::from(format!(
+                " ↑/↓ · lines {}–{last} of {} ",
+                view.scroll + 1,
+                view.doc.len()
+            ))
+            .right_aligned()
+            .style(dim()),
+        );
+    }
+    frame.render_widget(block, right);
+    frame.render_widget(
+        Paragraph::new(view.doc.clone()).scroll((view.scroll, 0)),
+        doc_area,
     );
+    frame.render_widget(timeline_line(view, output), scrubber_area);
 }
 
-/// The scrubber row under the hints: a track spanning the run with the as-of
-/// day marked, lit in accent while the timeline is grabbed.
+/// The scrubber row pinned at the bottom of the report window: a track
+/// spanning the run with the as-of day marked, lit in accent while the
+/// timeline is grabbed, with a ×4 badge while fast-forward is engaged.
 fn timeline_line(view: &AgingView, output: &RunOutput) -> Line<'static> {
-    const TRACK: usize = 40;
+    const TRACK: usize = 32;
     let total = output.finished_at.as_duration().as_secs_f64();
     let frac = if total > 0.0 {
         (view.as_of.as_duration().as_secs_f64() / total).clamp(0.0, 1.0)
@@ -578,12 +662,15 @@ fn timeline_line(view: &AgingView, output: &RunOutput) -> Line<'static> {
             bold()
         },
     ));
+    if grabbed && view.hold.turbo(Instant::now()) {
+        spans.push(Span::styled(" ×4", theme::accent_bold()));
+    }
+    // No moment label here — the report headline above already carries it.
     spans.push(Span::styled(
         format!(
-            "{}  ·  {}",
-            moment_label(view.as_of, output),
+            "  ·  {}",
             if grabbed {
-                "←/→ move a day · esc lets go"
+                "←/→ ±1 day (hold 1s: ×4) · esc lets go"
             } else {
                 "enter grabs the timeline"
             }
@@ -591,4 +678,40 @@ fn timeline_line(view: &AgingView, output: &RunOutput) -> Line<'static> {
         dim(),
     ));
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hold_shifts_into_turbo_after_a_second_and_resets_on_flip_or_gap() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut hold = Hold::default();
+
+        assert_eq!(hold.press(1, t0), 1, "a first press steps one day");
+        assert_eq!(hold.press(1, at(500)), 1, "a young hold stays 1×");
+        assert_eq!(
+            hold.press(1, at(1_100)),
+            TURBO_DAYS,
+            "a second-old hold fast-forwards"
+        );
+        assert!(hold.turbo(at(1_150)), "the ×4 badge shows mid-hold");
+        assert_eq!(
+            hold.press(-1, at(1_300)),
+            1,
+            "reversing direction starts a fresh hold"
+        );
+        assert_eq!(hold.press(-1, at(1_500)), 1, "still young the other way");
+        assert_eq!(
+            hold.press(-1, at(2_500)),
+            1,
+            "a gap past auto-repeat is a new press, not a hold"
+        );
+        assert!(
+            !hold.turbo(at(2_600)),
+            "the badge decays once repeats stop arriving"
+        );
+    }
 }

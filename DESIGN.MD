@@ -462,7 +462,14 @@ Class 4 — reclassified as **architectural invariants**, not faults:
     timeline), Esc steps back up with the pane bar as the top layer — and
     Esc/q no longer terminate anywhere. Ctrl-C is the only way out (the
     plain report still prints on exit), so stepping out of a deep layer
-    can never quit the program by accident.
+    can never quit the program by accident. Refined in place: the scrubber
+    row renders pinned inside the report window itself, at the bottom of
+    the same panel as the outcome bars and aging tables it drives; and a
+    hold on ←/→ — inferred purely from key cadence, since legacy terminals
+    never send key-up — shifts to four days per step after a second, wearing
+    a ×4 badge that decays once the repeats stop (enhanced-protocol
+    terminals report auto-repeat as Repeat events, so the event loop now
+    drops only Releases).
 
 ## Module layout
 

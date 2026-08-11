@@ -189,7 +189,11 @@ fn event_loop(
         let Event::Key(key) = event::read()? else {
             continue;
         };
-        if key.kind != KeyEventKind::Press {
+        // Terminals speaking an enhanced keyboard protocol report auto-repeat
+        // as Repeat instead of a stream of Presses — treat both as a press so
+        // holding a key (the timeline scrubber's fast-forward included)
+        // behaves the same everywhere. Releases are noise.
+        if key.kind == KeyEventKind::Release {
             continue;
         }
         if handle_key(&mut app, key.code, key.modifiers) {
@@ -549,7 +553,7 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect) {
         key("↑/↓", "pick a book — all providers first, then each one"),
         key(
             "enter",
-            "grab the timeline: ←/→ move the books a day, esc lets go",
+            "grab the timeline: ←/→ move the books a day (hold 1s: ×4), esc lets go",
         ),
         key("tab", "hop over to scroll the report"),
         Line::default(),
