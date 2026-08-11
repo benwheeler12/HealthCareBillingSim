@@ -3,11 +3,13 @@
 //! `sim` and `biller` never import each other — shared types live in `domain`.
 
 pub mod biller;
+pub mod claimgen;
 pub mod domain;
 pub mod ledger;
 pub mod reports;
 pub mod scenario;
 pub mod sim;
+pub mod simconfig;
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -32,8 +34,67 @@ use crate::sim::payer::{PayerConfig, default_payer_configs};
 use crate::sim::rng::RngFactory;
 use crate::sim::sim_truth::{SimTruth, run_recorder};
 
+/// Where the claim documents come from. `Generated` is the product path:
+/// claims are minted in memory and handed to ingest — and their claim tasks
+/// — as they are produced, with no file anywhere. `Lines` and `File` are
+/// library-only conveniences for tests, benchmarks, and replaying a real
+/// dataset.
+pub enum ClaimSource {
+    Generated(claimgen::GenConfig),
+    Lines(Vec<String>),
+    File(PathBuf),
+}
+
+impl ClaimSource {
+    /// The lazy line stream ingest consumes; `master_seed` resolves a
+    /// generator seed that follows the run's seed.
+    fn lines(
+        &self,
+        master_seed: u64,
+    ) -> anyhow::Result<Box<dyn Iterator<Item = std::io::Result<String>> + Send + '_>> {
+        match self {
+            ClaimSource::Generated(generator) => {
+                Ok(Box::new(claimgen::stream(generator, master_seed).map(Ok)))
+            }
+            ClaimSource::Lines(lines) => Ok(Box::new(lines.iter().cloned().map(Ok))),
+            ClaimSource::File(path) => {
+                let file = std::fs::File::open(path)
+                    .with_context(|| format!("opening {}", path.display()))?;
+                Ok(Box::new(std::io::BufReader::new(file).lines()))
+            }
+        }
+    }
+
+    /// Total documents when it is knowable up front (`File` streams blind).
+    pub fn known_count(&self) -> Option<usize> {
+        match self {
+            ClaimSource::Generated(generator) => Some(generator.count),
+            ClaimSource::Lines(lines) => Some(lines.len()),
+            ClaimSource::File(_) => None,
+        }
+    }
+}
+
+impl From<claimgen::GenConfig> for ClaimSource {
+    fn from(generator: claimgen::GenConfig) -> ClaimSource {
+        ClaimSource::Generated(generator)
+    }
+}
+
+impl From<Vec<String>> for ClaimSource {
+    fn from(lines: Vec<String>) -> ClaimSource {
+        ClaimSource::Lines(lines)
+    }
+}
+
+impl From<PathBuf> for ClaimSource {
+    fn from(path: PathBuf) -> ClaimSource {
+        ClaimSource::File(path)
+    }
+}
+
 pub struct RunConfig {
-    pub input_path: PathBuf,
+    pub source: ClaimSource,
     pub seed: u64,
     /// Claims ingested per virtual second.
     pub rate_per_sec: f64,
@@ -48,9 +109,9 @@ pub struct RunConfig {
 }
 
 impl RunConfig {
-    pub fn new(input_path: PathBuf, seed: u64, rate_per_sec: f64) -> RunConfig {
+    pub fn new(source: impl Into<ClaimSource>, seed: u64, rate_per_sec: f64) -> RunConfig {
         RunConfig {
-            input_path,
+            source: source.into(),
             seed,
             rate_per_sec,
             policy: RetryPolicy::default(),
@@ -171,11 +232,15 @@ pub async fn run(mut cfg: RunConfig) -> anyhow::Result<RunOutput> {
     })
 }
 
-/// Read the input file, validate each line, and spawn one claim task per
-/// valid claim. Malformed lines become Rejected ledger rows — never silent
-/// drops. The configured rate assigns each line its computed arrival time —
-/// line i lands at i × (1/rate), exactly where the rate-limited sleep loop
-/// used to put it — and returns the last arrival as the intake-end mark.
+/// Pull lines from the claim source, validate each one, and spawn one claim
+/// task per valid claim. Malformed lines become Rejected ledger rows — never
+/// silent drops. The configured rate assigns each line its computed arrival
+/// time — line i lands at i × (1/rate), exactly where the rate-limited sleep
+/// loop used to put it — and returns the last arrival as the intake-end mark.
+///
+/// The source streams lazily, so with a `Generated` source claims are handed
+/// to biller tasks batch by batch as they are minted — generation, validation
+/// and claim-task spawning are one pipeline with no intermediate file.
 ///
 /// Validation (JSON parsing — the CPU cost of ingest) runs in parallel:
 /// lines are read in batches, fanned out to one validator task per worker,
@@ -188,9 +253,6 @@ async fn ingest(
     deps: &ClaimTaskDeps,
 ) -> anyhow::Result<(JoinSet<()>, VirtualTime)> {
     const BATCH: usize = 16 * 1024;
-    let file = std::fs::File::open(&cfg.input_path)
-        .with_context(|| format!("opening {}", cfg.input_path.display()))?;
-    let reader = std::io::BufReader::new(file);
     let interval = Duration::from_secs_f64(1.0 / cfg.rate_per_sec);
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
 
@@ -198,7 +260,7 @@ async fn ingest(
     let mut seen = std::collections::HashSet::new();
     let mut arrival = VirtualTime::default();
     let mut line_no = 0usize;
-    let mut lines = reader.lines();
+    let mut lines = cfg.source.lines(cfg.seed)?;
     loop {
         let mut batch = Vec::with_capacity(BATCH);
         for line in lines.by_ref().take(BATCH) {

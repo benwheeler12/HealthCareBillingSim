@@ -1,7 +1,8 @@
 # Healthcare Billing Lifecycle Simulation
 
 Rust + Tokio simulation of the healthcare billing lifecycle — biller ↔
-clearinghouse ↔ insurance payers — built for the Brace Health take-home.
+clearinghouse ↔ insurance payers — originally built for the Brace Health
+take-home, since restructured into a fully interactive instrument.
 
 The clearinghouse + payers are a deliberately unreliable, seedable, memoryless
 adversary; the biller is the system under test. Correctness has one definition:
@@ -12,64 +13,73 @@ fault schedule.
 ## Quickstart
 
 ```sh
-# Run the simulation on a default configuration
-cargo run -- data/sample_claims_10k.jsonl
+# Opens the interactive configuration screen; Enter runs the simulation
+cargo run --release
 
-# Roll your own input at any size:
-cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out claims.jsonl
+# Headless (pipes, CI, --no-tui): one run of the flag-built config,
+# plain sequential reports — flags set the same knobs the screen edits
+cargo run --release -- --no-tui --count 100000 --seed 7 --malformed-rate 0.02
 
-# Scale test — the exact 1M-record input BENCHMARKS.MD was measured on
-# (~1 min wall, ~10 GiB peak on a 4-core machine):
-cargo run --release --bin generate-claims -- 100000 --seed 7 --malformed-rate 0.02 --out claims_1m.jsonl
-cargo run --release -- claims_1m.jsonl
-
-# Tests (56) and lints:
+# Tests and lints:
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-The input file is the only required argument: one PayerClaim JSON object per
-line (schema in `docs/TAKE_HOME_PROMPT.MD`).
+There is no input file. The program opens on a configuration form — claim
+generation (count, malformed rate, payer-mix drift, seed), simulation (seed,
+ingest rate), the clearinghouse fault profile, the biller's retry policy, and
+all ten payer personalities. **↑/↓** move between fields, **←/→** adjust the
+selected value, **Enter** on a payer row expands its personality and route
+faults, **Enter** anywhere else starts the run. Claims are then generated in
+memory and streamed straight into the simulation — handed to biller tasks as
+they are minted, no file on disk anywhere.
 
-## The TUI
+## The dashboard
 
-On a real terminal, a run opens an interactive UI: four panes, money views
-first — **A/R Aging** (the books as of a scrubbable virtual day: outcome bars,
+When the books drain, the run opens onto five panes, money views first —
+**A/R Aging** (the books as of a scrubbable virtual day: outcome bars,
 colored aging tables, per-provider), **Provider Insights** (a per-provider A/R
 analysis in plain English — where the money is stuck, what the open claims are
 doing, payer signals, the top chase items by risk, and recommended actions,
 every figure computed from the ledger), **Timeline** (per-day claim flow and
 the in-flight backlog draining to zero — the correctness guarantee as a
-picture), and **Payer Scorecard** (payers graded A–F, with the configured
+picture), **Payer Scorecard** (payers graded A–F, with the configured
 personality next to what the scorecard rediscovered from remittance data
-alone).
+alone), and **Configuration** — the startup form again, live: adjust any
+value and press Enter to kick off the next run without leaving the program.
 
 The whole key grammar: **←/→** move between panes, **↑/↓** select, **Enter**
 steps down a layer, **Esc** steps back up, **`?`** shows the full keyboard map,
-and **Ctrl-C** quits — printing the plain report so a record stays in your
-scrollback. When stdout is not a terminal (pipes, CI) or with `--no-tui`, you
-get the plain sequential report instead; that path also prints the sim-truth
-diagnostic — the god's-eye view of injected faults.
+and **Ctrl-C** quits — printing the plain report of the last completed run so
+a record stays in your scrollback. When stdout is not a terminal (pipes, CI)
+or with `--no-tui`, you get the plain sequential report instead; that path
+also prints the sim-truth diagnostic — the god's-eye view of injected faults.
 
 ## Configuration
 
-Every run starts by printing the full parameter set it actually used.
-Layers, later wins: **defaults → `--preset` → `--fault-profile` file →
+The configuration screen is the source of truth; CLI flags set its initial
+values. Layers, later wins: **defaults → `--preset` → `--fault-profile` file →
 individual flags** (see `cargo run -- --help` for the full set).
 
 - `--preset honest|messy|chaos` — defaults to `messy` (drops, duplicates,
   delays, and per-payer route personalities); `honest` is the lossless
-  baseline; `chaos` is everything at once.
+  baseline; `chaos` is everything at once. On the screen, presets rewrite the
+  fault fields in place — any manual edit flips the label to `custom`.
 - `--fault-profile FILE` — scenario JSON for precise control, including
   per-payer fault profiles (`data/demo_scenario.json` is a template).
-- `--seed` reproduces outcomes exactly; `--rate` is claims per *virtual*
-  second — the default spreads the 10k sample across ~9.5 virtual months so
+- `--seed` reproduces outcomes exactly; the generator follows it unless
+  `--gen-seed` pins the claim population separately, so you can hold the
+  world fixed while rerolling fault luck. `--rate` is claims per *virtual*
+  second — the default spreads 10k claims across ~9.5 virtual months so
   receivables genuinely age.
 
 ## Architecture in one screen
 
 ```
-input file ──▶ ingest (parallel validate, computed arrival times, dedup)
+config form ──▶ claim generator (seeded, in memory, valid + malformed mix)
+ (edit, Enter)   │ JSON lines, streamed as minted
+                 ▼
+               ingest (parallel validate, computed arrival times, dedup)
                  │ Rejected rows            │ valid claims
                  ▼                          ▼
              ledger fold ◀──events── claim task ×N (one per claim_id,
@@ -82,6 +92,9 @@ input file ──▶ ingest (parallel validate, computed arrival times, dedup)
                                       │
               quarantine clerk ◀──────┘ strays        sim-truth recorder
               (uncorrelatable deliveries)             (ground truth oracle)
+                 │ RunOutput
+                 ▼
+             dashboard (5 panes; pane 5 is the config form again ─▶ next run)
 ```
 
 The properties that make it work — each one section in

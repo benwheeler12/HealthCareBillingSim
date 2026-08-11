@@ -1,41 +1,83 @@
-//! Seeded input generator for demos and load tests: writes one PayerClaim
-//! JSON object per line. `--malformed-rate` mixes in every ingest-fault
-//! flavor (invalid JSON, bad NPI, unknown payer, negative charge, duplicate
-//! claim_id) so a generated file exercises fault-table class 1 end to end.
+//! Seeded in-memory claim generator: yields one PayerClaim JSON document per
+//! line, straight into ingest — no file on disk anywhere. `malformed_rate`
+//! mixes in every ingest-fault flavor (invalid JSON, bad NPI, unknown payer,
+//! negative charge, duplicate claim_id) so a generated run exercises
+//! fault-table class 1 end to end.
 //!
-//! Usage: cargo run --bin generate-claims -- 500 --seed 7 > claims.jsonl
+//! The interface is deliberately the *text line*, not a parsed `Claim`:
+//! malformed documents are corrupted at the JSON level, and ingest's
+//! validation is the system under test — generated lines flow through the
+//! exact same parallel-validation path a file's lines did.
 
-use std::io::Write;
-use std::path::PathBuf;
-
-use clap::Parser;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde_json::json;
 
-#[derive(Parser)]
-#[command(version, about)]
-struct Cli {
-    /// Number of lines to generate.
-    count: usize,
-
-    #[arg(long, default_value_t = 42)]
-    seed: u64,
-
+/// Everything the generator needs. `seed: None` follows the run's master
+/// seed — one keystroke rerolls the whole world; pin it to keep the claim
+/// population fixed while fault luck varies.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenConfig {
+    /// Number of claim documents to generate.
+    pub count: usize,
+    /// Generator seed; `None` follows the simulation's master seed.
+    pub seed: Option<u64>,
     /// Fraction of lines that are malformed in some way.
-    #[arg(long, default_value_t = 0.0)]
-    malformed_rate: f64,
+    pub malformed_rate: f64,
+    /// Drift the payer mix across the stream: anthem-heavy early,
+    /// medicare-heavy late, giving each payer a distinct A/R aging profile
+    /// when claims are ingested over virtual months.
+    pub drift: bool,
+}
 
-    /// Output path; stdout if omitted.
-    #[arg(long)]
-    out: Option<PathBuf>,
+impl Default for GenConfig {
+    fn default() -> GenConfig {
+        GenConfig {
+            count: 10_000,
+            seed: None,
+            malformed_rate: 0.02,
+            drift: true,
+        }
+    }
+}
 
-    /// Drift the payer mix across the file: anthem-heavy early, medicare-heavy
-    /// late (uhg steady). Gives each payer a distinct A/R aging profile when
-    /// the file is ingested over virtual months.
-    #[arg(long)]
-    drift: bool,
+impl GenConfig {
+    pub fn resolved_seed(&self, master_seed: u64) -> u64 {
+        self.seed.unwrap_or(master_seed)
+    }
+
+    /// One-line human summary for banners and the configuration form.
+    pub fn summary(&self, master_seed: u64) -> String {
+        format!(
+            "{} generated claims · {:.0}% malformed · drift {} · gen seed {}",
+            self.count,
+            self.malformed_rate * 100.0,
+            if self.drift { "on" } else { "off" },
+            match self.seed {
+                Some(seed) => seed.to_string(),
+                None => format!("follows master ({master_seed})"),
+            },
+        )
+    }
+}
+
+/// The generated stream, lazily: each `next()` mints one JSON line, so
+/// claims reach ingest — and their claim tasks — batch by batch as they are
+/// produced. Same config, same seed, same lines.
+pub fn stream(cfg: &GenConfig, master_seed: u64) -> impl Iterator<Item = String> + Send + use<> {
+    let mut rng = ChaCha8Rng::seed_from_u64(cfg.resolved_seed(master_seed));
+    let count = cfg.count;
+    let malformed_rate = cfg.malformed_rate;
+    let drift = cfg.drift;
+    (0..count).map(move |i| {
+        let position = i as f64 / count.max(1) as f64;
+        if rng.random_bool(malformed_rate) {
+            malformed_line(&mut rng, i, drift, position)
+        } else {
+            valid_line(&mut rng, i, drift, position)
+        }
+    })
 }
 
 const FIRST_NAMES: &[&str] = &[
@@ -55,10 +97,10 @@ const LAST_NAMES: &[&str] = &[
     "Hamilton",
 ];
 
-/// (payer_id, weight at file start, weight at file end). Weights drift
-/// linearly across the file: the slow, lossy payers (anthem, molina)
+/// (payer_id, weight at stream start, weight at stream end). Weights drift
+/// linearly across the stream: the slow, lossy payers (anthem, molina)
 /// dominate early and the fast, clean ones (medicare, kaiser) late, so the
-/// A/R aging report shows a distinct profile per payer when the file is
+/// A/R aging report shows a distinct profile per payer when claims are
 /// ingested over virtual months. Each column sums to 1.0.
 const PAYERS_DRIFT: &[(&str, f64, f64)] = &[
     ("anthem", 0.30, 0.04),
@@ -103,32 +145,8 @@ const PROCEDURES: &[&str] = &[
     "99213", "99214", "36415", "73030", "93000", "97110", "99396",
 ];
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    anyhow::ensure!(
-        (0.0..=1.0).contains(&cli.malformed_rate),
-        "--malformed-rate must be in [0,1]"
-    );
-    let mut rng = ChaCha8Rng::seed_from_u64(cli.seed);
-    let mut out: Box<dyn Write> = match &cli.out {
-        Some(path) => Box::new(std::fs::File::create(path)?),
-        None => Box::new(std::io::stdout().lock()),
-    };
-
-    for i in 0..cli.count {
-        let position = i as f64 / cli.count.max(1) as f64;
-        let line = if rng.random_bool(cli.malformed_rate) {
-            malformed_line(&mut rng, i, cli.drift, position)
-        } else {
-            valid_line(&mut rng, i, cli.drift, position)
-        };
-        writeln!(out, "{line}")?;
-    }
-    Ok(())
-}
-
 /// Payer for this line. Uniform by default; with drift, the slow payers
-/// dominate the start of the file and the fast ones the end.
+/// dominate the start of the stream and the fast ones the end.
 fn pick_payer(rng: &mut ChaCha8Rng, drift: bool, position: f64) -> &'static str {
     if !drift {
         return PAYERS_DRIFT[rng.random_range(0..PAYERS_DRIFT.len())].0;
@@ -224,5 +242,53 @@ fn malformed_line(rng: &mut ChaCha8Rng, i: usize, drift: bool, position: f64) ->
             &format!("gen-{i:06}"),
             &format!("gen-{:06}", i.saturating_sub(1)),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_config_same_lines() {
+        let cfg = GenConfig {
+            count: 200,
+            malformed_rate: 0.1,
+            ..GenConfig::default()
+        };
+        let a: Vec<String> = stream(&cfg, 7).collect();
+        let b: Vec<String> = stream(&cfg, 7).collect();
+        assert_eq!(a.len(), 200);
+        assert_eq!(a, b, "the stream must be a pure function of its seeds");
+        // A different master seed rerolls everything when gen seed follows.
+        let c: Vec<String> = stream(&cfg, 8).collect();
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn pinned_gen_seed_ignores_the_master_seed() {
+        let cfg = GenConfig {
+            count: 50,
+            seed: Some(11),
+            ..GenConfig::default()
+        };
+        let a: Vec<String> = stream(&cfg, 1).collect();
+        let b: Vec<String> = stream(&cfg, 2).collect();
+        assert_eq!(a, b, "a pinned generator seed fixes the claim population");
+    }
+
+    #[test]
+    fn malformed_rate_zero_yields_only_parseable_documents() {
+        let cfg = GenConfig {
+            count: 300,
+            malformed_rate: 0.0,
+            ..GenConfig::default()
+        };
+        for line in stream(&cfg, 42) {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&line).is_ok(),
+                "unparseable line from a zero-malformed stream: {line}"
+            );
+        }
     }
 }

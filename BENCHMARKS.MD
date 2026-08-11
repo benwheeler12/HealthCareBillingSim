@@ -34,6 +34,13 @@ Note the ceiling: **4 physical cores**, so the scaling curve can only be
 measured to 4 workers, and the box is a shared VM (one cold-start outlier
 was observed and discarded, see Method).
 
+> **Historical note:** these numbers were measured on the file-ingest CLI
+> (`<sim> claims_1m.jsonl`). The CLI has since moved to in-memory claim
+> generation — the equivalent run today is
+> `cargo run --release -- --no-tui --count 1000000 --seed 42 --gen-seed 7
+> --malformed-rate 0.02`; the file path survives library-only as
+> `ClaimSource::File` for replaying a fixed dataset.
+
 ## Method
 
 - Input: 1,000,000 generated claims (`generate-claims 1000000 --seed 7
