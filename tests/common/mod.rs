@@ -60,7 +60,7 @@ pub fn write_input(name: &str, lines: &[String]) -> PathBuf {
 }
 
 /// Run a fully-specified config to completion on a fresh multi-thread
-/// runtime — the same scheduler the binary uses (Decisions #23): claim tasks
+/// runtime — the same scheduler the binary uses (DESIGN.md 'Virtual time'): claim tasks
 /// really do execute in parallel under the tests.
 pub fn run_sim_with(cfg: RunConfig) -> RunOutput {
     let runtime = tokio::runtime::Builder::new_multi_thread()

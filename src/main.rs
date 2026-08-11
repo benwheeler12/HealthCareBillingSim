@@ -127,7 +127,7 @@ struct Cli {
     threads: usize,
 }
 
-/// Multi-thread tokio runtime for the simulation (Decisions #23: nothing
+/// Multi-thread tokio runtime for the simulation (DESIGN.md 'Virtual time': nothing
 /// sleeps, so no paused clock — claim tasks execute in true parallel).
 fn sim_runtime(threads: usize) -> std::io::Result<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();

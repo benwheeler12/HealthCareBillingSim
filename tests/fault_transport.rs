@@ -150,8 +150,8 @@ fn drops_exhausting_retry_budget_flag_the_claim() {
 /// injected transport delay crossing the biller's policy line. Retries whose
 /// delays also cross it exhaust the budget; the delayed remittances then
 /// arrive anyway, and a complete, balanced late answer is allowed to
-/// transition Flagged(RetriesExhausted) → Resolved (Decisions #6). A second
-/// late copy on the now-Resolved claim is ignored idempotency (Decisions #5).
+/// transition Flagged(RetriesExhausted) → Resolved (DESIGN.md Decisions). A second
+/// late copy on the now-Resolved claim is ignored idempotency (DESIGN.md Decisions).
 #[test]
 fn delays_beyond_timeout_flag_then_late_remittance_resolves() {
     let input: Vec<String> = (0..40).map(simple_claim).collect();

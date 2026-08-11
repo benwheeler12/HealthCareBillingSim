@@ -1,5 +1,5 @@
 //! Clearinghouse — the whole forward-hop / adjudication / return-hop pipeline
-//! as a request/response call (Decisions #23). No actor task, no spawns, no
+//! as a request/response call (DESIGN.md 'Virtual time'). No actor task, no spawns, no
 //! sleeps: durations are computed onto arrival timestamps, and `transact`
 //! executes on the *calling* claim task's thread, so adjudication runs in
 //! parallel across worker threads by construction. Transport faults are drawn

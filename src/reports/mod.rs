@@ -3,7 +3,7 @@
 //!
 //! Dependency rule: reports read only the ledger — with one deliberate,
 //! documented exception: `diagnostic` compares the ledger against sim-truth
-//! (Decisions #16); that is the report's entire purpose.
+//! (DESIGN.md Decisions); that is the report's entire purpose.
 
 pub mod aging;
 pub mod chase;

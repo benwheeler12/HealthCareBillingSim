@@ -81,7 +81,7 @@ pub struct RunOutput {
 
 /// Run the whole simulation to completion.
 ///
-/// Time is computed, never slept (Decisions #23), so this runs on any tokio
+/// Time is computed, never slept (DESIGN.md 'Virtual time'), so this runs on any tokio
 /// runtime — the multi-thread scheduler by default, where claim tasks
 /// genuinely execute in parallel. Shutdown is structural: input exhausted +
 /// claim-task JoinSet drained ⇒ channels close in dependency order ⇒ the

@@ -201,7 +201,7 @@ fn missing_lines_stay_partial_and_accumulate_across_retries() {
 }
 
 /// 3.5: the remittance turns to unparseable garbage in transit. Epistemically
-/// that is silence (Decisions #8) — the timeout machinery owns recovery — but
+/// that is silence (DESIGN.md Decisions) — the timeout machinery owns recovery — but
 /// a surviving claim_id fragment earns a "garbage received" history note,
 /// and uncorrelatable wreckage lands in quarantine.
 #[test]

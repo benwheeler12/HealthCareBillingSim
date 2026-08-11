@@ -1,4 +1,4 @@
-//! Fold-as-you-go with retained event log (Decisions #10): live state for
+//! Fold-as-you-go with retained event log (DESIGN.md Decisions): live state for
 //! runtime monitoring, raw log for replay and audit. `apply` is pure state
 //! transition — the async fn is only the channel shell.
 
@@ -38,7 +38,7 @@ pub struct FoldOutput {
 /// reached a terminal state. When a watch sender is supplied, counters are
 /// published every few events (and once at the end).
 ///
-/// Under computed time (Decisions #23) the merged stream is NOT virtual-time
+/// Under computed time (DESIGN.md 'Virtual time') the merged stream is NOT virtual-time
 /// sorted — parallel claim tasks emit in wall completion order, so a claim
 /// finished at virtual day 200 can land before another's day-10 event.
 /// Per-claim causal order still holds (each claim emits through one FIFO
@@ -254,7 +254,7 @@ impl Ledger {
     }
 }
 
-/// Late-arrival policy (Decisions #5/#6). On a Resolved claim the duplicate is
+/// Late-arrival policy (DESIGN.md Decisions). On a Resolved claim the duplicate is
 /// ignored — the history entry (already pushed) is the logged idempotency. On
 /// Flagged(RetriesExhausted), a complete and exactly-balanced late answer
 /// transitions the claim to Resolved; anything less stays flagged. This lives

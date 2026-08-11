@@ -16,7 +16,7 @@
 //!
 //! Threading: the TUI event loop owns the main thread on the *wall* clock;
 //! the simulation runs on its own multi-thread runtime behind a spawned
-//! thread (Decisions #23 — time is computed, so claim tasks parallelize).
+//! thread (DESIGN.md 'Virtual time' — time is computed, so claim tasks parallelize).
 //! They meet at two channels: the fold's live-progress watch tap, and a
 //! oneshot carrying the finished `RunOutput`.
 
@@ -71,7 +71,7 @@ pub fn run(mut cfg: RunConfig, opts: TuiOptions) -> anyhow::Result<RunOutput> {
     let (done_tx, done_rx) = mpsc::channel();
     let threads = opts.threads;
     let sim = std::thread::spawn(move || {
-        // Multi-thread runtime (Decisions #23): nothing sleeps, so no paused
+        // Multi-thread runtime (DESIGN.md 'Virtual time'): nothing sleeps, so no paused
         // clock — claim tasks execute in true parallel under the UI.
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         if threads > 0 {
