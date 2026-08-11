@@ -14,18 +14,8 @@ spec, the test matrix, and (deliberately) the git history.
 ## Quickstart
 
 ```sh
-# The default run already has weather in it — drops, duplicates, delays,
-# and per-route personalities (preset 'messy') across ten payers and one
-# hundred billing organizations, payers answering in days-to-weeks, and the
-# 10k sample spread across ~9.5 virtual months, so the AR aging report
-# fills every bucket with a distinct profile per payer:
+# Run the simulation on a default configuration
 cargo run -- data/sample_claims_10k.jsonl
-
-# The showcase: every fault class at once plus a denial-happy anthem:
-cargo run -- data/sample_claims_10k.jsonl --preset chaos
-
-# Lossless baseline, if you want a true happy path:
-cargo run -- data/sample_claims.jsonl --preset honest
 
 # Roll your own input at any size:
 cargo run --bin generate-claims -- 10000 --seed 7 --malformed-rate 0.02 --out claims.jsonl
